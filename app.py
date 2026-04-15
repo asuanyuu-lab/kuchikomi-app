@@ -3,82 +3,116 @@ import googlemaps
 from google import genai
 from google.genai import types
 import json
-import time
+import pandas as pd
+import plotly.express as px
 
-# 画面のデザイン
-st.set_page_config(page_title="SmartBX 2.0", layout="wide")
-st.title("SmartBX 2.0 - オンデマンド口コミ分析 🤖")
-st.write("ターゲットホテルの最新口コミを取得し、清掃課題をAIが自動抽出します。")
+# 1. ページ設定とタイトル変更
+st.set_page_config(page_title="ホテル口コミ分析", layout="wide")
+st.title("🏨 ホテル口コミ分析 - オンデマンド診断")
 
-# 検索ボックスとボタン
-target_hotel = st.text_input("分析したいホテル名を入力してください", "Fav 函館")
+# サイドバーでAPIキーとホテル名を設定
+with st.sidebar:
+    st.header("設定")
+    MAPS_API_KEY = st.secrets["MAPS_API_KEY"]
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    target_hotel = st.text_input("分析対象のホテル名", "Fav 函館")
+    analyze_btn = st.button("分析を実行", type="primary")
 
-if st.button("AI分析を実行する", type="primary"):
-    if target_hotel:
-        # パスワード（Secrets）の読み込み
-        MAPS_API_KEY = st.secrets["MAPS_API_KEY"]
-        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+if analyze_btn and target_hotel:
+    gmaps = googlemaps.Client(key=MAPS_API_KEY)
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    with st.spinner("データを収集中..."):
+        places_result = gmaps.places(query=target_hotel, language='ja')
+        if not places_result['results']:
+            st.error("指定されたホテルが見つかりませんでした。")
+            st.stop()
+            
+        place_id = places_result['results'][0]['place_id']
+        place_details = gmaps.place(place_id=place_id, fields=['name', 'rating', 'user_ratings_total', 'reviews'], language='ja')
         
-        gmaps = googlemaps.Client(key=MAPS_API_KEY)
-        ai_client = genai.Client(api_key=GEMINI_API_KEY)
+        hotel_name = place_details['result'].get('name', '不明')
+        total_rating = place_details['result'].get('rating', 0)
+        review_count = place_details['result'].get('user_ratings_total', 0)
+        reviews = place_details['result'].get('reviews', [])
+
+        if not reviews:
+            st.warning("直近の口コミが見つかりませんでした。")
+            st.stop()
+
+        # ダッシュボード上部のサマリー
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Google総合評価", f"★{total_rating}")
+        col2.metric("総口コミ数", f"{review_count}件")
+
+        # AI分析処理
+        results = []
+        cleaning_count = 0
         
-        with st.status("データ収集中...", expanded=True) as status:
-            st.write("Googleマップでホテルを検索中...")
-            places_result = gmaps.places(query=target_hotel, language='ja')
+        for r in reviews:
+            text = r.get('text', '')
+            if not text: continue
             
-            if not places_result['results']:
-                status.update(label="ホテルが見つかりませんでした", state="error")
-                st.stop()
-                
-            place_id = places_result['results'][0]['place_id']
-            st.write("口コミを取得中...")
-            place_details = gmaps.place(place_id=place_id, fields=['name', 'reviews'], language='ja')
-            reviews = place_details.get('result', {}).get('reviews', [])
+            prompt = f"""
+            あなたは清掃ロボット営業マンです。以下の口コミをJSON形式で分析してください。
+            1. is_cleaning: (true/false) 清掃関連の不満か
+            2. category: 「床のホコリ・ゴミ」「水回りの汚れ・カビ」「ニオイ」「ベッド周辺」「その他清掃」「清掃以外」
+            3. robot_match: 清掃ロボットで解決可能か (高/中/低/対象外)
+            4. score: 緊急度 (1〜5)
+            5. summary: 15文字以内の要約
+            口コミ: "{text}"
+            """
             
-            if not reviews:
-                status.update(label="口コミがありません", state="error")
-                st.stop()
+            try:
+                response = ai_client.models.generate_content(
+                    model='gemini-1.5-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                analysis = json.loads(response.text)
+                if analysis.get('is_cleaning'): cleaning_count += 1
                 
-            st.write("Gemini AIで清掃課題を分析中...")
-            
-            results_list = []
-            for review in reviews:
-                text = review.get('text', '')
-                if not text: continue
-                
-                prompt = f"""
-                あなたは清掃ロボット営業マンです。以下の口コミをJSONで分析してください。
-                1. is_cleaning: (true/false)
-                2. category: 「床のホコリ・ゴミ」「水回りの汚れ・カビ」「ニオイ」「備品・ベッドの乱れ」「その他清掃」「清掃以外」
-                3. robot_match: (高/中/低/対象外)
-                4. score: (1〜5の整数)
-                5. summary: (15文字以内の要約)
-                口コミ: "{text}"
-                出力形式: {{"is_cleaning": true, "category": "...", "robot_match": "...", "score": 0, "summary": "..."}}
-                """
-                
-                try:
-                    response = ai_client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=prompt,
-                        config=types.GenerateContentConfig(response_mime_type="application/json")
-                    )
-                    analysis = json.loads(response.text)
-                    results_list.append({
-                        "投稿時期": review.get('relative_time_description', ''),
-                        "本文": text,
-                        "清掃関連": analysis.get("is_cleaning"),
-                        "カテゴリ": analysis.get("category"),
-                        "ロボット適性": analysis.get("robot_match"),
-                        "スコア": analysis.get("score"),
-                        "要約": analysis.get("summary")
-                    })
-                    time.sleep(2) # 制限対策
-                except Exception as e:
-                    continue
-            
-            status.update(label="分析完了！", state="complete")
+                results.append({
+                    "時期": r.get('relative_time_description', '-'),
+                    "内容": text,
+                    "清掃関連": "あり" if analysis.get('is_cleaning') else "なし",
+                    "カテゴリ": analysis.get('category', '-'),
+                    "ロボット適性": analysis.get('robot_match', '-'),
+                    "スコア": analysis.get('score', 0),
+                    "要約": analysis.get('summary', '-')
+                })
+            except:
+                continue
+
+        col3.metric("清掃課題率(直近)", f"{(cleaning_count/len(reviews)*100):.1f}%")
+
+        # データの表を作成し、英語や空値を日本語化
+        df = pd.DataFrame(results).fillna("-")
+
+        # グラフセクション
+        st.subheader("📊 清掃課題の分析結果")
+        df_clean = df[df["清掃関連"] == "あり"]
         
-        # 結果を画面に表形式で綺麗に表示
-        st.subheader(f"「{target_hotel}」の分析結果")
-        st.dataframe(results_list, use_container_width=True)
+        if not df_clean.empty:
+            g_col1, g_col2 = st.columns(2)
+            
+            with g_col1:
+                fig_bar = px.bar(df_clean['カテゴリ'].value_counts().reset_index(), 
+                                x='index', y='カテゴリ', title="課題カテゴリの内訳",
+                                labels={'index': 'カテゴリ', 'カテゴリ': '件数'})
+                st.plotly_chart(fig_bar, use_container_width=True)
+                
+            with g_col2:
+                fig_pie = px.pie(df_clean, names='ロボット適性', title="ロボット導入による解決期待度",
+                               color='ロボット適性',
+                               color_discrete_map={'高': '#EF4444', '中': '#F59E0B', '低': '#10B981', '対象外': '#9CA3AF'})
+                st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.success("直近の口コミに清掃に関する課題は見当たりませんでした。")
+
+        # 詳細テーブル
+        st.subheader("📋 口コミ詳細一覧")
+        st.dataframe(df, use_container_width=True)
+
+else:
+    st.info("左側のサイドバーからホテル名を入力して「分析を実行」を押してください。")
