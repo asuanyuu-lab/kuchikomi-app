@@ -40,12 +40,17 @@ if analyze_btn and target_hotel:
             st.warning("直近の口コミが見つかりませんでした。")
             st.stop()
 
+
+       # --- （ここより上はそのままです） ---
+        
         # ダッシュボード上部のサマリー
         col1, col2, col3 = st.columns(3)
         col1.metric("Google総合評価", f"★{total_rating}")
         col2.metric("総口コミ数", f"{review_count}件")
 
-        # AI分析処理
+        # ==========================================
+        # 修正箇所：AI分析処理と安全装置
+        # ==========================================
         results = []
         cleaning_count = 0
         
@@ -65,7 +70,7 @@ if analyze_btn and target_hotel:
             
             try:
                 response = ai_client.models.generate_content(
-                    model='gemini-1.5-flash',
+                    model='gemini-2.5-flash', # ★Colabで成功したモデルに修正
                     contents=prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
@@ -81,8 +86,15 @@ if analyze_btn and target_hotel:
                     "スコア": analysis.get('score', 0),
                     "要約": analysis.get('summary', '-')
                 })
-            except:
+            except Exception as e:
+                # ★裏側で何のエラーが起きたか画面に表示する安全装置
+                st.error(f"一部の口コミでAI分析エラーが発生しました: {e}")
                 continue
+
+        # ★もし全ての分析が失敗して空っぽになった場合のストッパー
+        if not results:
+            st.error("AIの分析が完了しませんでした。APIの制限などの可能性があります。")
+            st.stop()
 
         col3.metric("清掃課題率(直近)", f"{(cleaning_count/len(reviews)*100):.1f}%")
 
@@ -91,24 +103,34 @@ if analyze_btn and target_hotel:
 
         # グラフセクション
         st.subheader("📊 清掃課題の分析結果")
-        df_clean = df[df["清掃関連"] == "あり"]
         
-        if not df_clean.empty:
-            g_col1, g_col2 = st.columns(2)
+        # ★安全装置：ちゃんと「清掃関連」列があるか確認してから処理する
+        if "清掃関連" in df.columns:
+            df_clean = df[df["清掃関連"] == "あり"]
             
-            with g_col1:
-                fig_bar = px.bar(df_clean['カテゴリ'].value_counts().reset_index(), 
-                                x='index', y='カテゴリ', title="課題カテゴリの内訳",
-                                labels={'index': 'カテゴリ', 'カテゴリ': '件数'})
-                st.plotly_chart(fig_bar, use_container_width=True)
+            if not df_clean.empty:
+                g_col1, g_col2 = st.columns(2)
                 
-            with g_col2:
-                fig_pie = px.pie(df_clean, names='ロボット適性', title="ロボット導入による解決期待度",
-                               color='ロボット適性',
-                               color_discrete_map={'高': '#EF4444', '中': '#F59E0B', '低': '#10B981', '対象外': '#9CA3AF'})
-                st.plotly_chart(fig_pie, use_container_width=True)
+                with g_col1:
+                    # 棒グラフの集計データを整理
+                    category_counts = df_clean['カテゴリ'].value_counts().reset_index()
+                    category_counts.columns = ['カテゴリ', '件数'] # 列名を日本語に指定
+                    
+                    fig_bar = px.bar(category_counts, 
+                                    x='件数', y='カテゴリ', title="課題カテゴリの内訳",
+                                    orientation='h') # 横棒グラフに設定
+                    fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                    
+                with g_col2:
+                    fig_pie = px.pie(df_clean, names='ロボット適性', title="ロボット導入による解決期待度",
+                                   color='ロボット適性',
+                                   color_discrete_map={'高': '#EF4444', '中': '#F59E0B', '低': '#10B981', '対象外': '#9CA3AF'})
+                    st.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.success("直近の口コミに清掃に関する課題は見当たりませんでした。")
         else:
-            st.success("直近の口コミに清掃に関する課題は見当たりませんでした。")
+             st.warning("分析データが不足しているためグラフを描画できません。")
 
         # 詳細テーブル
         st.subheader("📋 口コミ詳細一覧")
