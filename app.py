@@ -53,19 +53,12 @@ if analyze_btn and target_hotel:
         cleaning_count = 0
         progress_bar = st.progress(0)
         
-        # ==========================================
-        # 🚀 ここが「まとめ読み（バッチ処理）」の心臓部！
-        # ==========================================
-        batch_size = 10 # 一度にAIに渡す口コミの数（10件まとめ読み）
+        batch_size = 10 # 一度にAIに渡す口コミの数
         
         for i in range(0, len(valid_reviews), batch_size):
-            # 10件ずつ切り取る
             batch = valid_reviews[i:i + batch_size]
-            
-            # AIに渡すための「ID付きのリスト」を作成
             input_data = [{"id": j, "text": r['text']} for j, r in enumerate(batch)]
             
-            # AIへの指示書（複数件を一気に分析させる）
             prompt = f"""
             あなたは清掃ロボット営業マンです。以下の【複数の口コミ】を一度に分析し、
             必ず指定されたJSONの「配列（リスト）形式」で回答してください。
@@ -88,7 +81,6 @@ if analyze_btn and target_hotel:
             ]
             """
             
-            # エラー発生時のリトライ機能
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -98,10 +90,13 @@ if analyze_btn and target_hotel:
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
                     
-                    # AIから返ってきた10件分の結果をリストとして読み込む
-                    batch_analysis = json.loads(response.text)
+                    # ★AIの回答に余計な記号(```json)が混ざっていたら除去する「お掃除機能」
+                    raw_text = response.text.strip()
+                    if raw_text.startswith("```"):
+                        raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                        
+                    batch_analysis = json.loads(raw_text)
                     
-                    # 結果を元の口コミデータとくっつける
                     for analysis in batch_analysis:
                         idx = analysis.get("id")
                         if idx is not None and idx < len(batch):
@@ -120,7 +115,6 @@ if analyze_btn and target_hotel:
                                 "要約": analysis.get('summary', '-')
                             })
                     
-                    # バッチ処理成功時は、AIのスピード違反にならないよう最低限（4秒）だけ待つ
                     time.sleep(4) 
                     break 
                     
@@ -128,25 +122,30 @@ if analyze_btn and target_hotel:
                     error_msg = str(e)
                     if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                         if attempt < max_retries - 1:
-                            time.sleep(20) # 怒られたら20秒休む
+                            time.sleep(20)
                         else:
                             pass 
                     else:
+                        # 429以外のエラー（パース失敗など）はループを抜けてスキップ
                         break
             
-            # 進捗バーの更新
             progress = min((i + batch_size) / len(valid_reviews), 1.0)
             progress_bar.progress(progress)
 
         col3.metric("清掃課題率", f"{(cleaning_count/len(valid_reviews)*100 if valid_reviews else 0):.1f}%")
 
-        # データの表を作成し、英語や空値を日本語化
-        df = pd.DataFrame(results).fillna("-")
+        # ==========================================
+        # 🚀 ここが今回の修正の目玉！エラー回避の鉄壁ガード
+        # ==========================================
+        # 万が一 results が空っぽでも、見出し（列）だけは作って KeyError を防ぎます
+        expected_columns = ["時期", "内容", "清掃関連", "カテゴリ", "ロボット適性", "スコア", "要約"]
+        df = pd.DataFrame(results, columns=expected_columns).fillna("-")
 
         # グラフセクション
         st.subheader("📊 清掃課題の分析結果")
         df_clean = df[df["清掃関連"] == "あり"]
         
+        # DataFrameが空じゃない場合のみグラフを描画
         if not df_clean.empty:
             g_col1, g_col2 = st.columns(2)
             
@@ -162,7 +161,7 @@ if analyze_btn and target_hotel:
                                color_discrete_map={'高': '#EF4444', '中': '#F59E0B', '低': '#10B981', '対象外': '#9CA3AF'})
                 st.plotly_chart(fig_pie, use_container_width=True)
         else:
-            st.success("分析した口コミの中に、清掃に関する課題は見当たりませんでした。")
+            st.success("分析した口コミの中に、清掃に関する課題は見当たりませんでした。（またはデータの取得に失敗しました）")
 
         # 詳細テーブル
         st.subheader("📋 口コミ詳細一覧")
