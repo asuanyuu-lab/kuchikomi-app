@@ -1,3 +1,5 @@
 streamlit
 googlemaps
 google-genai
+pandas
+plotly
