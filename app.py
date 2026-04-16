@@ -15,10 +15,9 @@ st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化�
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\n自動ページめくり機能（URL追跡型）搭載！")
+    st.success("✨ 完全無料モード稼働中：\n自動ページめくり機能（JS解析型）搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
-    # 指示通りデフォルトを空白にしました
     target_input = st.text_input("じゃらんの口コミURL を入力", "")
     max_pages = st.number_input("探索する最大ページ数（※1ページ最大約30件）", min_value=1, max_value=15, value=5)
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
@@ -65,32 +64,64 @@ def scrape_jalan_reviews(base_url, max_pages):
                 break
 
             # ========================================================
-            # 【重要】共有いただいたURLの法則を利用した最強のページ探索
+            # 【重要】JavaScript(onclick)解析型ページ送りロジック
             # ========================================================
             next_url = None
-            next_page_num = page + 2 # 現在が1ページ目(page=0)なら、次は「2」
-            next_idx = (page + 1) * 30 # 次のページのオフセット（30, 60, 90...）
             
-            # ページ内のすべてのリンク(href)の文字列自体をチェックする
-            for a in soup.find_all('a'):
-                href = a.get('href', '')
-                if not href or href.startswith(('#', 'javascript')):
-                    continue
-                    
-                # hrefの中に「2.html/HTML」または「idx=30」が含まれていれば、それが確実に次のページ！
-                if f'{next_page_num}.html' in href.lower() or f'idx={next_idx}' in href:
-                    next_url = href
-                    debug_log.append(f"💡 HTML内から次ページへの正規リンクを発見しました！")
-                    break
-                    
-            if next_url:
-                if not next_url.startswith('http'):
-                    next_url = urllib.parse.urljoin(current_url, next_url)
+            # まず「次へ」ボタンを探す（クラス名が'next'、またはテキストに'次へ'を含む）
+            next_link = soup.find('a', class_=re.compile(r'(?i)next'))
+            if not next_link:
+                next_link = soup.find('a', string=re.compile(r'.*次へ.*'))
+
+            if next_link:
+                onclick_attr = next_link.get('onclick', '')
+                href_attr = next_link.get('href', '')
                 
+                # いただいたHTMLの javascript:selectPage('30','2') から数字を抜き出す！
+                match = re.search(r"selectPage\('(\d+)','(\d+)'\)", onclick_attr)
+                
+                if match:
+                    next_idx = match.group(1)   # 例: '30'
+                    next_page_num = match.group(2) # 例: '2'
+                    debug_log.append(f"💡 JavaScriptから「idx={next_idx}」「ページ={next_page_num}」を抽出成功！URLを自動生成します。")
+                    
+                    # 現在のURLを分解して、新しいページネーションURLを構築する
+                    parsed = urllib.parse.urlparse(current_url)
+                    
+                    # 1. パスの書き換え (/.../kuchikomi/2.html にする)
+                    path = re.sub(r'\d+\.html$', '', parsed.path, flags=re.IGNORECASE)
+                    if not path.endswith('/'):
+                        path += '/'
+                    next_path = f"{path}{next_page_num}.html"
+                    
+                    # 2. パラメータの書き換え (idx=30 にする)
+                    query_params = urllib.parse.parse_qs(parsed.query)
+                    query_params['idx'] = [next_idx]
+                    
+                    # screenId を口コミ一覧用のIDに更新（じゃらんの仕様エラー回避）
+                    if 'screenId' in query_params:
+                        query_params['screenId'] = ['UWW3701']
+                        
+                    new_query = urllib.parse.urlencode(query_params, doseq=True)
+                    
+                    # 3. URLを合体！
+                    next_url = urllib.parse.urlunparse((
+                        parsed.scheme, parsed.netloc, next_path, 
+                        parsed.params, new_query, parsed.fragment
+                    ))
+                    
+                # もし普通のリンク(href)が存在する場合の予備処理
+                elif href_attr and not href_attr.startswith(('#', 'javascript')):
+                    if not href_attr.startswith('http'):
+                        next_url = urllib.parse.urljoin(current_url, href_attr)
+                    else:
+                        next_url = href_attr
+                        
+            if next_url:
                 current_url = next_url
                 time.sleep(1) 
             else:
-                debug_log.append(f"「{next_page_num}ページ目」を示すリンクがHTML内に見つかりませんでした。最後のページと判定します。")
+                debug_log.append("「次へ」のリンクまたはJavaScriptの遷移処理が見つからないため、最後のページです。")
                 break 
                 
     except Exception as e:
@@ -115,7 +146,7 @@ if analyze_btn:
             st.write("※ ログを確認し、2ページ目以降にアクセスできているかチェックしてください。")
             if actual_count > 0:
                 st.dataframe(pd.DataFrame(valid_reviews))
-            st.text_area("抽出ログ", debug_text, height=150)
+            st.text_area("抽出ログ", debug_text, height=200)
 
         if actual_count == 0:
             st.error("有効な口コミデータが取得できませんでした。上記の抽出ログを確認してください。")
