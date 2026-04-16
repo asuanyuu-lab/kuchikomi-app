@@ -8,61 +8,74 @@ import time
 import requests
 from bs4 import BeautifulSoup
 import re
+import urllib.parse
 
 # 1. ページ設定
 st.set_page_config(page_title="ホテル口コミ分析", layout="wide")
-st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん対応）")
+st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化型）")
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\nじゃらんの口コミページURLを入力してください。")
+    st.success("✨ 完全無料モード稼働中：\n自動ページめくり機能搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
     st.markdown("### 抽出ターゲット")
-    # 楽天ではなく「じゃらん」の口コミURLを入力させます
     target_input = st.text_input("じゃらんの口コミURL を入力", "https://www.jalan.net/yad331562/kuchikomi/")
+    
+    # ★新機能：何ページめくるかを選択できる！
+    max_pages = st.number_input("取得する最大ページ数（1ページ約30件）", min_value=1, max_value=15, value=5)
+    
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
 
-def scrape_jalan_reviews(review_url):
-    """じゃらんから口コミを抽出し、デバッグ情報も返す"""
+def scrape_jalan_reviews(base_url, max_pages):
+    """じゃらんから複数ページの口コミを正確に抽出し、デバッグ情報も返す"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
     }
     
     reviews = []
     debug_log = []
+    current_url = base_url
     
     try:
-        debug_log.append(f"アクセス先: {review_url}")
-        response = requests.get(review_url, headers=headers, timeout=15)
-        debug_log.append(f"HTTPステータス: {response.status_code}")
-        response.raise_for_status() 
-        
-        response.encoding = response.apparent_encoding 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        debug_log.append(f"取得HTML（先頭150文字）:\n{soup.prettify()[:150]}")
-        
-        # じゃらんの口コミ本文を探す（クラス名が変わっても対応できるよう複数指定）
-        comments = soup.find_all('p', class_=re.compile(r'jln-review-detail__text|kuchikomi-text|jln-quic-review-body|p-review__text', re.I))
-        
-        # 🚀【無敵モード】もし特定のクラスで見つからなければ「50文字以上の長文」を口コミとして強引に拾う
-        if not comments:
-            debug_log.append("専用クラスが見つからないため、長文解析モードに切り替えます。")
-            paragraphs = soup.find_all(['p', 'div'])
-            for p in paragraphs:
-                text = p.get_text(strip=True)
-                # 50文字以上で、かつメニューなどの不要ワードを含まないものを抽出
-                if len(text) > 50 and not re.search(r'プラン詳細|予約する|キャンセル|会員登録', text):
-                    reviews.append({"text": text, "date": "日付不明"})
-        else:
-            debug_log.append(f"見つかった口コミの数: {len(comments)}件")
+        for page in range(max_pages):
+            debug_log.append(f"【{page+1}ページ目】アクセス先: {current_url}")
+            response = requests.get(current_url, headers=headers, timeout=15)
+            response.raise_for_status() 
+            response.encoding = response.apparent_encoding 
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 🚀【修正の目玉】じゃらんの「本物の口コミ」が入っている正確な箱だけを狙い撃ち！
+            comments = soup.find_all(['p', 'div'], class_=re.compile(r'jlnpc-kuchikomiCassette__postBody|jln-review-detail__text|kuchikomi-text'))
+            
+            if not comments:
+                debug_log.append(f"⚠️ {page+1}ページ目で口コミが見つかりませんでした。")
+                break 
+                
+            debug_log.append(f"→ 本物の口コミを {len(comments)}件 発見！")
             for comment in comments:
                 text = comment.get_text(strip=True)
-                if len(text) > 20: # 短すぎるノイズを排除
+                if len(text) > 10: 
                     reviews.append({"text": text, "date": "日付不明"})
-                    
+            
+            # 🚀【新機能】「次へ」のリンクを探して、自動でページをめくる
+            next_link = soup.find('a', string=re.compile(r'.*次へ.*'))
+            if not next_link:
+                # クラス名で探すフォールバック
+                next_link = soup.find('a', class_=re.compile(r'next|jln-pagination__next'))
+                
+            if next_link and next_link.has_attr('href'):
+                next_url = next_link['href']
+                if not next_url.startswith('http'):
+                    next_url = urllib.parse.urljoin(current_url, next_url)
+                current_url = next_url
+                
+                # サーバーにブロックされないよう2秒休憩（これ超重要です）
+                time.sleep(2) 
+            else:
+                debug_log.append("「次へ」のボタンがないため、最後のページです。")
+                break 
+                
     except Exception as e:
         debug_log.append(f"🚨 エラー発生: {str(e)}")
         
@@ -72,9 +85,9 @@ def scrape_jalan_reviews(review_url):
 if analyze_btn and target_input:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     
-    with st.status("🔍 じゃらんからデータを抽出中...", expanded=True) as status:
+    with st.status(f"🔍 じゃらんから最大 {max_pages} ページ分のデータを抽出中...", expanded=True) as status:
         
-        valid_reviews, debug_text = scrape_jalan_reviews(target_input)
+        valid_reviews, debug_text = scrape_jalan_reviews(target_input, max_pages)
 
         if not valid_reviews:
             status.update(label="抽出失敗：口コミが0件でした", state="error")
@@ -83,7 +96,7 @@ if analyze_btn and target_input:
                 st.code(debug_text, language="text")
             st.stop()
 
-        status.update(label=f"計 {len(valid_reviews)} 件の口コミを抽出完了！AI分析を開始します...", state="running")
+        status.update(label=f"計 {len(valid_reviews)} 件の【本物の口コミ】を抽出完了！AI分析を開始します...", state="running")
         
         # 3. AIによるまとめ読み分析
         results = []
