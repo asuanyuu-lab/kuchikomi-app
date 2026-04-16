@@ -15,10 +15,10 @@ st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化�
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆重複排除機能搭載！")
+    st.success("✨ 完全無料モード稼働中：\n自動ページめくり機能（URL追跡型）搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
-    # 修正1: デフォルトを空白に変更
+    # 指示通りデフォルトを空白にしました
     target_input = st.text_input("じゃらんの口コミURL を入力", "")
     max_pages = st.number_input("探索する最大ページ数（※1ページ最大約30件）", min_value=1, max_value=15, value=5)
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
@@ -65,57 +65,32 @@ def scrape_jalan_reviews(base_url, max_pages):
                 break
 
             # ========================================================
-            # 修正2: 404を起こす危険な生成を排除し、的確に「次へ」を探す
+            # 【重要】共有いただいたURLの法則を利用した最強のページ探索
             # ========================================================
             next_url = None
+            next_page_num = page + 2 # 現在が1ページ目(page=0)なら、次は「2」
+            next_idx = (page + 1) * 30 # 次のページのオフセット（30, 60, 90...）
             
-            # 1. SEO用の <link rel="next"> 
-            seo_next = soup.find('link', rel='next')
-            if seo_next and seo_next.get('href'):
-                next_url = seo_next['href']
-            
-            # 2. ページネーションエリアをピンポイントで探す（無関係なリンクの誤爆を防ぐ）
-            if not next_url:
-                pagination_blocks = soup.find_all(['div', 'ul'], class_=re.compile(r'(?i)paging|pagination|jlnpc-kuchikomiPagination'))
-                if pagination_blocks:
-                    for block in pagination_blocks:
-                        for a in block.find_all('a'):
-                            text = a.get_text(strip=True)
-                            href = a.get('href', '')
-                            # 「次」が含まれていて、ダミーリンクではないものを探す
-                            if ('次' in text or '>' in text or '＞' in text) and href and not href.startswith(('#', 'javascript')):
-                                next_url = href
-                                break
-                        if next_url:
-                            break
-
-            # 3. ページネーションエリアが見つからなかった場合、ページ全体のaタグから慎重に探す
-            if not next_url:
-                for a in soup.find_all('a'):
-                    text = a.get_text(strip=True)
-                    href = a.get('href', '')
-                    # 「次の宿」などを引かないように「件」や「次へ」に絞る
-                    if ('次へ' in text or ('次' in text and '件' in text)) and href and not href.startswith(('#', 'javascript')):
-                        next_url = href
-                        break
-
-            # 次のURLが見つかった場合の処理
+            # ページ内のすべてのリンク(href)の文字列自体をチェックする
+            for a in soup.find_all('a'):
+                href = a.get('href', '')
+                if not href or href.startswith(('#', 'javascript')):
+                    continue
+                    
+                # hrefの中に「2.html/HTML」または「idx=30」が含まれていれば、それが確実に次のページ！
+                if f'{next_page_num}.html' in href.lower() or f'idx={next_idx}' in href:
+                    next_url = href
+                    debug_log.append(f"💡 HTML内から次ページへの正規リンクを発見しました！")
+                    break
+                    
             if next_url:
                 if not next_url.startswith('http'):
                     next_url = urllib.parse.urljoin(current_url, next_url)
                 
-                # ループ検知（ベースURLが同じならストップ）
-                current_base = urllib.parse.urldefrag(current_url)[0]
-                next_base = urllib.parse.urldefrag(next_url)[0]
-                
-                if current_base == next_base:
-                    debug_log.append("⚠️ 「次へ」のURLがループしているため終了します。")
-                    break
-
                 current_url = next_url
                 time.sleep(1) 
             else:
-                debug_log.append("「次へ」のリンクがないため、最後のページです。")
+                debug_log.append(f"「{next_page_num}ページ目」を示すリンクがHTML内に見つかりませんでした。最後のページと判定します。")
                 break 
                 
     except Exception as e:
@@ -123,20 +98,21 @@ def scrape_jalan_reviews(base_url, max_pages):
         
     return reviews, "\n".join(debug_log)
 
+
 if analyze_btn:
     if not target_input:
         st.warning("⚠️ じゃらんの口コミURLを入力してください。")
     else:
         ai_client = genai.Client(api_key=GEMINI_API_KEY)
         
-        with st.status(f"🔍 じゃらんの口コミを探索中... (最大 {max_pages} ページ)", expanded=True) as status:
+        with st.spinner(f"🔍 じゃらんの口コミをスクレイピング中... (最大 {max_pages} ページ)"):
             valid_reviews, debug_text = scrape_jalan_reviews(target_input, max_pages)
             actual_count = len(valid_reviews)
 
-            status.update(label=f"✅ スクレイピング完了！重複を除いた【 実際の口コミ件数：{actual_count}件 】", state="complete")
+        st.success(f"✅ スクレイピング完了！重複を除いた【 実際の口コミ件数：{actual_count}件 】")
 
-        with st.expander("🛠 【重要】AI分析に回す「生の取得データ」と「ログ」を確認する", expanded=False):
-            st.write("※ ここに表示されているテキストが『本当の口コミ』になっているか確認してください。")
+        with st.expander("🛠 【重要】AI分析に回す「生の取得データ」と「ログ」を確認する", expanded=True):
+            st.write("※ ログを確認し、2ページ目以降にアクセスできているかチェックしてください。")
             if actual_count > 0:
                 st.dataframe(pd.DataFrame(valid_reviews))
             st.text_area("抽出ログ", debug_text, height=150)
@@ -145,75 +121,84 @@ if analyze_btn:
             st.error("有効な口コミデータが取得できませんでした。上記の抽出ログを確認してください。")
             st.stop()
 
-        with st.spinner(f"🤖 AIが {actual_count} 件の口コミから「清掃課題」を探しています..."):
-            results = []
-            cleaning_count = 0
-            progress_bar = st.progress(0)
-            batch_size = 50 
+        st.info(f"🤖 AIが {actual_count} 件の口コミから「清掃課題」を探しています...")
+        
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        
+        results = []
+        cleaning_count = 0
+        batch_size = 50 
+        
+        for i in range(0, actual_count, batch_size):
+            progress_text.text(f"処理中... {i}件 / {actual_count}件完了")
             
-            for i in range(0, actual_count, batch_size):
-                batch = valid_reviews[i:i + batch_size]
-                input_data = [{"id": j, "text": r['text']} for j, r in enumerate(batch)]
-                
-                prompt = f"""
-                あなたは清掃ロボット営業マンです。以下の複数の口コミを分析し、指定されたJSONの配列形式で回答してください。
-                1. id: 入力されたid
-                2. is_cleaning: (true/false) 清掃関連の不満か
-                3. category: 「床のホコリ・ゴミ」「水回りの汚れ・カビ」「ニオイ」「ベッド周辺」「その他清掃」「清掃以外」
-                4. robot_match: 清掃ロボットで解決可能か (高/中/低/対象外)
-                5. score: 緊急度 (1〜5)
-                6. summary: 15文字以内の要約
+            batch = valid_reviews[i:i + batch_size]
+            input_data = [{"id": j, "text": r['text']} for j, r in enumerate(batch)]
+            
+            prompt = f"""
+            あなたは清掃ロボット営業マンです。以下の複数の口コミを分析し、指定されたJSONの配列形式で回答してください。
+            1. id: 入力されたid
+            2. is_cleaning: (true/false) 清掃関連の不満か
+            3. category: 「床のホコリ・ゴミ」「水回りの汚れ・カビ」「ニオイ」「ベッド周辺」「その他清掃」「清掃以外」
+            4. robot_match: 清掃ロボットで解決可能か (高/中/低/対象外)
+            5. score: 緊急度 (1〜5)
+            6. summary: 15文字以内の要約
 
-                【入力データ】
-                {json.dumps(input_data, ensure_ascii=False)}
-                """
-                
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        response = ai_client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=prompt,
-                            config=types.GenerateContentConfig(response_mime_type="application/json")
-                        )
+            【入力データ】
+            {json.dumps(input_data, ensure_ascii=False)}
+            """
+            
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = ai_client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=prompt,
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
+                    
+                    raw_text = response.text.strip()
+                    if raw_text.startswith("```"):
+                        raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
                         
-                        raw_text = response.text.strip()
-                        if raw_text.startswith("```"):
-                            raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                    batch_analysis = json.loads(raw_text)
+                    
+                    for analysis in batch_analysis:
+                        idx = analysis.get("id")
+                        if idx is not None and idx < len(batch):
+                            original_review = batch[idx]
                             
-                        batch_analysis = json.loads(raw_text)
-                        
-                        for analysis in batch_analysis:
-                            idx = analysis.get("id")
-                            if idx is not None and idx < len(batch):
-                                original_review = batch[idx]
+                            if analysis.get('is_cleaning'): 
+                                cleaning_count += 1
                                 
-                                if analysis.get('is_cleaning'): 
-                                    cleaning_count += 1
-                                    
-                                results.append({
-                                    "時期": original_review.get('date', '-'),
-                                    "内容": original_review['text'],
-                                    "清掃関連": "あり" if analysis.get('is_cleaning') else "なし",
-                                    "カテゴリ": analysis.get('category', '-'),
-                                    "ロボット適性": analysis.get('robot_match', '-'),
-                                    "スコア": analysis.get('score', 0),
-                                    "要約": analysis.get('summary', '-')
-                                })
-                        
-                        time.sleep(1) 
-                        break 
-                    except Exception as e:
-                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            if attempt < max_retries - 1:
-                                time.sleep(10)
-                            else: pass 
-                        else: break
-                
-                progress = min((i + batch_size) / actual_count, 1.0)
-                progress_bar.progress(progress)
-                
+                            results.append({
+                                "時期": original_review.get('date', '-'),
+                                "内容": original_review['text'],
+                                "清掃関連": "あり" if analysis.get('is_cleaning') else "なし",
+                                "カテゴリ": analysis.get('category', '-'),
+                                "ロボット適性": analysis.get('robot_match', '-'),
+                                "スコア": analysis.get('score', 0),
+                                "要約": analysis.get('summary', '-')
+                            })
+                    
+                    time.sleep(1) 
+                    break 
+                except Exception as e:
+                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        if attempt < max_retries - 1:
+                            progress_text.text(f"API制限回避のため待機中... (リトライ {attempt+1}/{max_retries})")
+                            time.sleep(10)
+                        else: pass 
+                    else: break
+            
+            progress = min((i + batch_size) / actual_count, 1.0)
+            progress_bar.progress(progress)
+            
+        progress_text.text(f"処理完了！ {actual_count}件 / {actual_count}件完了")
         st.success(f"🎉 全 {actual_count} 件の分析が完了しました！")
+
+        st.divider()
 
         st.subheader(f"分析結果（実際の抽出件数: {actual_count}件）")
         col1, col2 = st.columns(2)
