@@ -9,10 +9,9 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import urllib.parse
-from datetime import timedelta
 
 st.set_page_config(page_title="ホテル口コミ分析", layout="wide")
-st.title("🏨 ホテル口コミ分析 - 安定＆詳細デバッグ版")
+st.title("🏨 ホテル口コミ分析 - 【決定版】爆速＆安定モード")
 
 with st.sidebar:
     st.header("設定")
@@ -53,7 +52,6 @@ def scrape_jalan_reviews(base_url, max_pages):
             debug_log.append(f"→ 新規口コミ {added_in_this_page} 件取得")
             if added_in_this_page == 0: break
 
-            # ページ送り（JS解析）
             next_url = None
             next_link = soup.find('a', class_=re.compile(r'(?i)next')) or soup.find('a', string=re.compile(r'.*次へ.*'))
             if next_link:
@@ -74,107 +72,110 @@ def scrape_jalan_reviews(base_url, max_pages):
             if next_url:
                 current_url = next_url
                 time.sleep(0.1)
-            else: 
-                debug_log.append("「次へ」リンクがなくなったため終了")
-                break
+            else: break
     except Exception as e:
-        debug_log.append(f"🚨 エラー: {str(e)}")
+        debug_log.append(f"🚨 スクレイピングエラー: {str(e)}")
     return reviews, "\n".join(debug_log)
 
 if analyze_btn and target_input:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # --- ステップ1: スクレイピング ---
-    with st.status("🔍 口コミデータを探索・抽出中...", expanded=True) as status:
+    # 🔍 STEP 1: スクレイピング
+    with st.status("🔍 口コミデータを抽出中...", expanded=True) as status:
         valid_reviews, debug_text = scrape_jalan_reviews(target_input, max_pages)
         actual_count = len(valid_reviews)
-        status.update(label=f"✅ 抽出完了（実件数: {actual_count}件）", state="complete", expanded=False)
+        status.update(label=f"✅ 抽出完了（実件数: {actual_count}件）", state="complete")
 
-    # --- 復活したデバッグ機能 ---
-    with st.expander("🛠 【デバッグ】抽出された生データとログを確認する", expanded=False):
-        st.write("AI分析に回す前のデータです。正しく取れているか確認してください。")
+    # 🛠 復活したデバッグ機能
+    with st.expander("🛠 【デバッグ】抽出された生データを確認", expanded=False):
         if actual_count > 0:
             st.dataframe(pd.DataFrame(valid_reviews))
-        st.text_area("実行ログ", debug_text, height=200)
+        st.text_area("実行ログ", debug_text, height=150)
 
     if actual_count == 0:
-        st.error("有効なデータが取得できませんでした。URLを確認してください。")
-        st.stop()
+        st.error("有効なデータが取得できませんでした。"); st.stop()
 
-    # --- ステップ2: AI分析 ---
-    st.info(f"🤖 AI(Gemini 1.5 Flash)で {actual_count} 件を分析します...")
-    progress_info = st.empty()
+    # 🤖 STEP 2: AI分析（二段構えロジック）
+    st.info(f"🤖 AI(Gemini)で {actual_count} 件を分析中...")
     progress_bar = st.progress(0)
     
     results = []
     batch_size = 50 
-    expected_cols = ["時期", "内容", "清掃関連", "カテゴリ", "ロボット適性", "スコア", "要約"]
+    expected_cols = ["内容", "清掃関連", "カテゴリ", "ロボット適性", "スコア", "要約"]
     
+    # モデルの候補リスト（404対策）
+    model_candidates = ['gemini-2.0-flash', 'gemini-1.5-flash']
+    active_model = model_candidates[0]
+
     for i in range(0, actual_count, batch_size):
-        progress_info.write(f"📊 分析進捗: {min(i + batch_size, actual_count)} / {actual_count} 件")
         batch = valid_reviews[i:i + batch_size]
         input_data = [{"id": j, "text": r['text']} for j, r in enumerate(batch)]
         
-        prompt = f"""あなたは清掃ロボット営業マンです。以下の口コミを分析し、JSON配列形式で回答してください。
+        prompt = f"""清掃ロボット営業マンとして以下をJSON配列で分析。
         1. id, 2. is_cleaning, 3. category, 4. robot_match, 5. score, 6. summary
-        【入力データ】
-        {json.dumps(input_data, ensure_ascii=False)}"""
+        【入力】{json.dumps(input_data, ensure_ascii=False)}"""
         
-        try:
-            # 2.0が404になるため、最も安定している1.5-flashを使用
-            response = ai_client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            
-            raw_text = response.text.strip()
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            
-            batch_analysis = json.loads(raw_text)
-            for analysis in batch_analysis:
-                idx = analysis.get("id")
-                if idx is not None and idx < len(batch):
-                    results.append({
-                        "時期": "-", "内容": batch[idx]['text'],
-                        "清掃関連": "あり" if analysis.get('is_cleaning') else "なし",
-                        "カテゴリ": analysis.get('category', '-'),
-                        "ロボット適性": analysis.get('robot_match', '-'),
-                        "スコア": analysis.get('score', 0),
-                        "要約": analysis.get('summary', '-')
-                    })
-            time.sleep(0.2)
-        except Exception as e:
-            st.error(f"AI分析中にエラーが発生しました: {e}")
+        # モデル試行ループ
+        success = False
+        for model_id in model_candidates:
+            try:
+                response = ai_client.models.generate_content(
+                    model=model_id,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                
+                raw_text = response.text.strip()
+                if raw_text.startswith("```"):
+                    raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                
+                batch_analysis = json.loads(raw_text)
+                for analysis in batch_analysis:
+                    idx = analysis.get("id")
+                    if idx is not None and idx < len(batch):
+                        results.append({
+                            "時期": "-", "内容": batch[idx]['text'],
+                            "清掃関連": "あり" if analysis.get('is_cleaning') else "なし",
+                            "カテゴリ": analysis.get('category', '-'),
+                            "ロボット適性": analysis.get('robot_match', '-'),
+                            "スコア": analysis.get('score', 0),
+                            "要約": analysis.get('summary', '-')
+                        })
+                success = True
+                active_model = model_id # 成功したモデルを保持
+                break # 成功したら試行ループを抜ける
+            except Exception as e:
+                if "404" in str(e):
+                    continue # 次のモデルを試す
+                else:
+                    st.error(f"分析エラー: {e}")
+                    break
+        
+        if not success:
+            st.error("全てのモデルで404エラーが発生しました。APIキーの権限を確認してください。")
             break
-        progress_bar.progress(min((i + batch_size) / actual_count, 1.0))
-        
-    st.success("🎉 分析がすべて完了しました！")
-    st.divider()
 
-    # --- ステップ3: 結果表示 ---
-    # 最初から期待される列を持つDataFrameを作成してKeyErrorを防止
-    df = pd.DataFrame(results, columns=expected_cols).fillna("-")
+        progress_bar.progress(min((i + batch_size) / actual_count, 1.0))
+        time.sleep(0.1)
+        
+    st.success(f"🎉 分析完了！ (使用モデル: {active_model})")
+
+    # 📊 STEP 3: 結果表示
+    df = pd.DataFrame(results, columns=["時期"] + expected_cols).fillna("-")
     df_clean = df[df["清掃関連"] == "あり"]
     
+    st.divider()
     col1, col2 = st.columns(2)
     col1.metric("取得した口コミ総数", f"{actual_count}件")
-    col2.metric("清掃関連の課題数", f"{len(df_clean)}件")
+    col2.metric("清掃課題数", f"{len(df_clean)}件")
 
     if not df_clean.empty:
         g_col1, g_col2 = st.columns(2)
         with g_col1:
-            st.plotly_chart(px.bar(df_clean['カテゴリ'].value_counts().reset_index(), x='count', y='カテゴリ', title="課題カテゴリの内訳", orientation='h'))
+            st.plotly_chart(px.bar(df_clean['カテゴリ'].value_counts().reset_index(), x='count', y='カテゴリ', title="課題カテゴリ", orientation='h'))
         with g_col2:
             st.plotly_chart(px.pie(df_clean, names='ロボット適性', title="ロボット導入の期待度"))
-        
-        st.subheader("📋 清掃に関する課題が指摘された口コミ")
+        st.subheader("📋 清掃課題の一覧")
         st.dataframe(df_clean, use_container_width=True)
-        
-        st.subheader("📝 すべての分析結果")
-        st.dataframe(df, use_container_width=True)
     else:
-        st.warning("清掃に関する明確な課題は見当たりませんでした。")
-        st.subheader("📝 すべての分析結果")
-        st.dataframe(df, use_container_width=True)
+        st.warning("清掃に関する課題は見当たりませんでした。")
