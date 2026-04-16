@@ -1,5 +1,6 @@
 streamlit
-googlemaps
 google-genai
 pandas
 plotly
+requests
+beautifulsoup4
