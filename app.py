@@ -59,54 +59,70 @@ def scrape_jalan_reviews(base_url, max_pages):
             
             debug_log.append(f"→ 新規の口コミを {added_in_this_page}件 取得！ / 重複スキップ: {skipped_in_this_page}件")
             
+            # 新規の口コミが0件なら、本当にページが終わった（またはループした）と判定
             if added_in_this_page == 0:
                 debug_log.append("⚠️ 新規の口コミが0件のため、すべての口コミを取得完了したと判定し終了します。")
                 break
 
             # ========================================================
-            # ページネーション（次へ）の取得ロジックを大幅強化（ダミーリンク対策）
+            # ページネーション取得ロジック（最終形態：URL強制生成フォールバック付き）
             # ========================================================
             next_url = None
             
-            # 1. SEO用の <link rel="next"> があれば最優先（ダミーを引く可能性がゼロ）
+            # 1. SEO用の <link rel="next"> 
             seo_next = soup.find('link', rel='next')
             if seo_next and seo_next.get('href'):
                 next_url = seo_next['href']
             
-            # 2. なければ「次へ」を含むリンクから、ダミー（#やjavascript）を除外して探す
+            # 2. 「次」を含むリンク（画像ボタンのalt属性や「次の30件」など幅広く対応）
             if not next_url:
                 for a in soup.find_all('a'):
-                    text = a.get_text(strip=True)
                     href = a.get('href', '')
-                    if '次へ' in text and href and not href.startswith(('#', 'javascript')):
+                    if not href or href.startswith(('#', 'javascript')):
+                        continue
+                        
+                    text = a.get_text(strip=True)
+                    alt = ''
+                    img = a.find('img')
+                    if img and img.has_attr('alt'):
+                        alt = img['alt']
+                        
+                    if '次' in text or '次' in alt:
                         next_url = href
                         break
             
-            # 3. それでもなければクラス名で探す
-            if not next_url:
-                for a in soup.find_all('a', class_=re.compile(r'(?i)next|jln-pagination__next|jlnpc-kuchikomiPagination__next')):
-                    href = a.get('href', '')
-                    if href and not href.startswith(('#', 'javascript')):
-                        next_url = href
-                        break
-                        
+            # URLが取得できた場合のループ判定
             if next_url:
                 if not next_url.startswith('http'):
                     next_url = urllib.parse.urljoin(current_url, next_url)
                 
-                # ループ防止：URLのフラグメント（#以降）を削除してベースURLを厳密に比較
                 current_base = urllib.parse.urldefrag(current_url)[0]
                 next_base = urllib.parse.urldefrag(next_url)[0]
                 
                 if current_base == next_base:
-                    debug_log.append("⚠️ 「次へ」のURLが現在と実質同じ（#の違いのみ）ため終了します。")
-                    break
+                    next_url = None # ループと判定し、直下の強制生成へフォールバック
                     
-                current_url = next_url
-                time.sleep(1) 
-            else:
-                debug_log.append("「次へ」のリンクがないため、最後のページです。")
-                break 
+            # 3. HTMLから見つからない場合の最終奥義：じゃらんのURL法則から強制生成
+            if not next_url:
+                debug_log.append("⚠️ 「次へ」ボタンが見つからないため、URLの法則から次のページを自動生成します。")
+                parsed = urllib.parse.urlparse(current_url)
+                # 現在のURLから /2.html などのページ番号部分を削る
+                path = re.sub(r'/?\d+\.html$', '', parsed.path, flags=re.IGNORECASE)
+                if not path.endswith('/'):
+                    path += '/'
+                    
+                # page変数は0から始まるので、次のページは page+2
+                next_page_num = page + 2
+                next_path = f"{path}{next_page_num}.html"
+                
+                # パラメータ（?screenId=...等）はそのまま引き継いでURLを再構築
+                next_url = urllib.parse.urlunparse((
+                    parsed.scheme, parsed.netloc, next_path, 
+                    parsed.params, parsed.query, parsed.fragment
+                ))
+
+            current_url = next_url
+            time.sleep(1) 
                 
     except Exception as e:
         debug_log.append(f"🚨 エラー発生: {str(e)}")
