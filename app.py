@@ -7,6 +7,8 @@ import plotly.express as px
 import time
 import requests
 from bs4 import BeautifulSoup
+import urllib.parse
+import re
 
 # 1. ページ設定
 st.set_page_config(page_title="ホテル口コミ分析", layout="wide")
@@ -15,57 +17,76 @@ st.title("🏨 ホテル口コミ分析 - 完全無料版（楽天トラベル�
 # サイドバー
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\nスクレイピングAPIを使用せず、Pythonが直接データを取得します。")
+    st.success("✨ 完全無料モード稼働中：\nホテル名から楽天トラベルを自動検索し、口コミを直接抽出します。")
     
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
     st.markdown("### 抽出ターゲット")
-    # ホテル名ではなく、URLを直接入力させるのが0円の秘訣！
-    target_url = st.text_input(
-        "楽天トラベルの口コミURLを入力", 
-        "https://travel.rakuten.co.jp/HOTEL/12345/review.html" # 例としてのダミーURL
-    )
+    # URLではなく「ホテル名」に戻しました！
+    target_hotel = st.text_input("分析対象のホテル名", "Fav 函館")
     
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
 
+# 【新機能】ホテル名から楽天の「ホテルID」を自動で探し出す関数
+def get_rakuten_hotel_id(hotel_name):
+    encoded_name = urllib.parse.quote(hotel_name)
+    search_url = f"https://search.travel.rakuten.co.jp/ds/search/dtl?f_kw={encoded_name}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    try:
+        response = requests.get(search_url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 検索結果からホテルURLを探し、数字（ID）を抜き出す
+        for a in soup.find_all('a', href=True):
+            match = re.search(r'travel\.rakuten\.co\.jp/HOTEL/(\d+)', a['href'])
+            if match:
+                return match.group(1) # ホテルIDを発見！
+    except Exception as e:
+        print(f"検索エラー: {e}")
+    return None
+
 # 楽天トラベルから無料で口コミを引っこ抜く関数
-def scrape_rakuten_reviews(url):
-    # ロボットではなく人間からのアクセスに見せかける設定
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+def scrape_rakuten_reviews(hotel_id):
+    review_url = f"https://travel.rakuten.co.jp/HOTEL/{hotel_id}/review.html"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
     reviews = []
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status() # エラーチェック
+        response = requests.get(review_url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 楽天トラベルの口コミ本文が書かれている部分（クラス名）を探す
-        # ※サイトの仕様変更によりクラス名が変わった場合はここを修正します
         comments = soup.find_all('p', class_='commentSentence')
         dates = soup.find_all('span', class_='time')
         
         for i, comment in enumerate(comments):
             text = comment.get_text(strip=True)
             if text:
-                # 取得できた日付があればセット、なければ「不明」
                 date_str = dates[i].get_text(strip=True) if i < len(dates) else "日付不明"
                 reviews.append({"text": text, "date": date_str})
                 
     except Exception as e:
-        st.error(f"ページの読み込みに失敗しました。URLが正しいか確認してください。エラー: {e}")
+        print(f"抽出エラー: {e}")
         
     return reviews
 
 # メイン処理
-if analyze_btn and target_url:
+if analyze_btn and target_hotel:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     
-    with st.status("🔍 楽天トラベルからデータを無料で抽出中...", expanded=True) as status:
+    with st.status(f"🔍 「{target_hotel}」を楽天トラベルで検索中...", expanded=True) as status:
         
-        # 1. 無料スクレイピングの実行
-        valid_reviews = scrape_rakuten_reviews(target_url)
+        # 1. ホテルIDを検索
+        hotel_id = get_rakuten_hotel_id(target_hotel)
+        
+        if not hotel_id:
+            status.update(label="楽天トラベル上にホテルが見つかりませんでした。", state="error")
+            st.stop()
+            
+        st.write("ホテルを発見しました！口コミページにアクセスします...")
+        
+        # 2. 無料スクレイピングの実行
+        valid_reviews = scrape_rakuten_reviews(hotel_id)
 
         if not valid_reviews:
             status.update(label="口コミが見つかりませんでした", state="error")
@@ -73,7 +94,7 @@ if analyze_btn and target_url:
 
         status.update(label=f"計 {len(valid_reviews)} 件の口コミを抽出完了！AI分析を開始します...", state="running")
         
-        # 2. AIによるまとめ読み分析（前回と同じバッチ処理）
+        # 3. AIによるまとめ読み分析
         results = []
         cleaning_count = 0
         progress_bar = st.progress(0)
@@ -146,8 +167,8 @@ if analyze_btn and target_url:
             
         status.update(label="すべての分析が完了しました！", state="complete")
 
-    # 3. ダッシュボード表示
-    st.subheader(f"分析結果（抽出件数: {len(valid_reviews)}件）")
+    # ダッシュボード表示
+    st.subheader(f"「{target_hotel}」の分析結果（抽出件数: {len(valid_reviews)}件）")
     
     col1, col2 = st.columns(2)
     col1.metric("取得した口コミ数", f"{len(valid_reviews)}件")
