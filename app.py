@@ -15,7 +15,7 @@ st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化�
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆重複排除機能搭載！")
+    st.success("✨ 完全無料モード稼働中：\n重複の可視化＆高精度AI分析搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
     target_input = st.text_input("じゃらんの口コミURL を入力", "https://www.jalan.net/yad331562/kuchikomi/")
@@ -27,7 +27,7 @@ def scrape_jalan_reviews(base_url, max_pages):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     reviews = []
-    seen_texts = set() # 重複排除用のセット
+    seen_texts = set()
     debug_log = []
     current_url = base_url
     
@@ -46,17 +46,21 @@ def scrape_jalan_reviews(base_url, max_pages):
                 break 
                 
             added_in_this_page = 0
+            duplicates_in_this_page = 0 # 重複カウント用を追加
+            
             for comment in comments:
                 text = comment.get_text(strip=True)
-                # 10文字以上、かつ、まだ追加していないテキスト（重複排除）のみ取得
-                if len(text) > 10 and text not in seen_texts: 
-                    reviews.append({"text": text, "date": "日付不明"})
-                    seen_texts.add(text)
-                    added_in_this_page += 1
+                if len(text) > 10:
+                    if text not in seen_texts: 
+                        reviews.append({"text": text, "date": "日付不明"})
+                        seen_texts.add(text)
+                        added_in_this_page += 1
+                    else:
+                        duplicates_in_this_page += 1
             
-            debug_log.append(f"→ 新規の口コミを {added_in_this_page}件 取得！")
+            # デバッグログに重複件数も明記する
+            debug_log.append(f"→ 新規の口コミ: {added_in_this_page}件 / 重複してスキップした口コミ: {duplicates_in_this_page}件")
             
-            # このページで1件も新しい口コミが取れなかった場合は、最終ページとみなしてループを抜ける
             if added_in_this_page == 0:
                 debug_log.append("⚠️ 新規の口コミが0件のため、すべての口コミを取得完了したと判定し終了します。")
                 break
@@ -70,7 +74,6 @@ def scrape_jalan_reviews(base_url, max_pages):
                 if not next_url.startswith('http'):
                     next_url = urllib.parse.urljoin(current_url, next_url)
                 
-                # 次のURLが現在のURLと全く同じ場合（無効なボタン等）は終了
                 if next_url == current_url:
                     debug_log.append("⚠️ 「次へ」のURLがループしているため終了します。")
                     break
@@ -95,13 +98,11 @@ if analyze_btn and target_input:
 
         status.update(label=f"✅ スクレイピング完了！重複を除いた【 実際の口コミ件数：{actual_count}件 】", state="complete")
 
-    # ========= デバッグ用UIの追加 =========
     with st.expander("🛠 【重要】AI分析に回す「生の取得データ」と「ログ」を確認する", expanded=True):
-        st.write("※ ここに表示されているテキストが『本当の口コミ』になっているか確認してください。関係ない文字ばかりならスクレイピングの精度を直す必要があります。")
+        st.write("※ ここに表示されているテキストが『本当の口コミ』になっているか確認してください。")
+        st.text_area("抽出ログ（重複排除の状況などを確認）", debug_text, height=200)
         if actual_count > 0:
             st.dataframe(pd.DataFrame(valid_reviews))
-        st.text_area("抽出ログ", debug_text, height=150)
-    # ====================================
 
     if actual_count == 0:
         st.error("有効な口コミデータが取得できませんでした。上記の抽出ログを確認してください。")
@@ -117,13 +118,22 @@ if analyze_btn and target_input:
             batch = valid_reviews[i:i + batch_size]
             input_data = [{"id": j, "text": r['text']} for j, r in enumerate(batch)]
             
+            # AIの判断基準を「営業マン特化」に大幅強化
             prompt = f"""
-            あなたは清掃ロボット営業マンです。以下の複数の口コミを分析し、指定されたJSONの配列形式で回答してください。
+            あなたは清掃ロボット・清掃サービスの優秀なインサイドセールスです。
+            以下の複数の口コミを分析し、指定されたJSONの配列形式で回答してください。
+
+            【超重要：清掃課題（is_cleaning）の判定基準】
+            以下の要素が1つでも含まれていれば、必ず `is_cleaning: true` と判定してください。
+            1. カビ（黒カビ等）、シミ、ホコリ、髪の毛、ゴミ、水垢、ニオイに関する言及。
+            2. ユーザーが「経年劣化だから仕方ない」「古いから妥協した」と諦めている場合でも、対象がシミやカビ等の汚れであれば絶対に「true」です。（特殊清掃でアプローチできるため）
+            3. 部屋全体や水回りの「清潔感がない」「薄暗くて汚く見える」といった言及。
+
             1. id: 入力されたid
-            2. is_cleaning: (true/false) 清掃関連の不満か
-            3. category: 「床のホコリ・ゴミ」「水回りの汚れ・カビ」「ニオイ」「ベッド周辺」「その他清掃」「清掃以外」
-            4. robot_match: 清掃ロボットで解決可能か (高/中/低/対象外)
-            5. score: 緊急度 (1〜5)
+            2. is_cleaning: (true/false) 清掃関連の課題・不満が含まれているか（上記基準を厳守）
+            3. category: 「床のホコリ・ゴミ・シミ」「水回りの汚れ・カビ」「ニオイ」「ベッド周辺」「その他清掃」「清掃以外」
+            4. robot_match: 清掃ロボットや特殊清掃で解決可能か (高/中/低/対象外)
+            5. score: 緊急度・不満度 (1〜5)
             6. summary: 15文字以内の要約
 
             【入力データ】
