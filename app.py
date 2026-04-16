@@ -63,9 +63,6 @@ def scrape_jalan_reviews(base_url, max_pages):
                 debug_log.append("⚠️ 新規の口コミが0件のため、すべての口コミを取得完了したと判定し終了します。")
                 break
 
-            # ========================================================
-            # 【重要】JavaScript(onclick)解析型ページ送りロジック
-            # ========================================================
             next_url = None
             
             # まず「次へ」ボタンを探す（クラス名が'next'、またはテキストに'次へ'を含む）
@@ -77,7 +74,7 @@ def scrape_jalan_reviews(base_url, max_pages):
                 onclick_attr = next_link.get('onclick', '')
                 href_attr = next_link.get('href', '')
                 
-                # いただいたHTMLの javascript:selectPage('30','2') から数字を抜き出す！
+                # javascript:selectPage('30','2') から数字を抜き出す
                 match = re.search(r"selectPage\('(\d+)','(\d+)'\)", onclick_attr)
                 
                 if match:
@@ -85,32 +82,30 @@ def scrape_jalan_reviews(base_url, max_pages):
                     next_page_num = match.group(2) # 例: '2'
                     debug_log.append(f"💡 JavaScriptから「idx={next_idx}」「ページ={next_page_num}」を抽出成功！URLを自動生成します。")
                     
-                    # 現在のURLを分解して、新しいページネーションURLを構築する
                     parsed = urllib.parse.urlparse(current_url)
                     
-                    # 1. パスの書き換え (/.../kuchikomi/2.html にする)
+                    # 1. パスの書き換え (ここで必ず大文字の .HTML にする！)
                     path = re.sub(r'\d+\.html$', '', parsed.path, flags=re.IGNORECASE)
                     if not path.endswith('/'):
                         path += '/'
-                    next_path = f"{path}{next_page_num}.html"
+                    next_path = f"{path}{next_page_num}.HTML" # ← 修正箇所！
                     
-                    # 2. パラメータの書き換え (idx=30 にする)
+                    # 2. パラメータの書き換え
                     query_params = urllib.parse.parse_qs(parsed.query)
                     query_params['idx'] = [next_idx]
                     
-                    # screenId を口コミ一覧用のIDに更新（じゃらんの仕様エラー回避）
+                    # screenId を口コミ一覧用のIDに更新
                     if 'screenId' in query_params:
                         query_params['screenId'] = ['UWW3701']
                         
                     new_query = urllib.parse.urlencode(query_params, doseq=True)
                     
-                    # 3. URLを合体！
+                    # 3. URLを合体
                     next_url = urllib.parse.urlunparse((
                         parsed.scheme, parsed.netloc, next_path, 
                         parsed.params, new_query, parsed.fragment
                     ))
                     
-                # もし普通のリンク(href)が存在する場合の予備処理
                 elif href_attr and not href_attr.startswith(('#', 'javascript')):
                     if not href_attr.startswith('http'):
                         next_url = urllib.parse.urljoin(current_url, href_attr)
@@ -143,7 +138,6 @@ if analyze_btn:
         st.success(f"✅ スクレイピング完了！重複を除いた【 実際の口コミ件数：{actual_count}件 】")
 
         with st.expander("🛠 【重要】AI分析に回す「生の取得データ」と「ログ」を確認する", expanded=True):
-            st.write("※ ログを確認し、2ページ目以降にアクセスできているかチェックしてください。")
             if actual_count > 0:
                 st.dataframe(pd.DataFrame(valid_reviews))
             st.text_area("抽出ログ", debug_text, height=200)
