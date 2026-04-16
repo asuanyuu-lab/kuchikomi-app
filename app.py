@@ -14,99 +14,114 @@ import re
 st.set_page_config(page_title="ホテル口コミ分析", layout="wide")
 st.title("🏨 ホテル口コミ分析 - 完全無料版（楽天ハイブリッド型）")
 
-# サイドバー
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\nホテル名検索、またはURLの直接入力のどちらでも分析可能です。")
-    
+    st.success("✨ 完全無料モード稼働中")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    
-    st.markdown("### 抽出ターゲット")
-    # ★ここが進化！名前でもURLでもOKな「ハイブリッド入力」
-    target_input = st.text_input("ホテル名、または 楽天の口コミURL を入力", "FAV HOTEL 函館")
+    target_input = st.text_input("ホテル名、または 楽天の口コミURL を入力", "https://travel.rakuten.co.jp/HOTEL/182842/review.html")
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
 
 def extract_id_from_text(text):
-    """URLやテキストからHOTEL ID（数字）を抜き出す"""
     match = re.search(r'HOTEL/(\d+)', text, re.IGNORECASE)
     return match.group(1) if match else None
 
 def get_rakuten_hotel_id(hotel_name):
-    """ホテル名から楽天を検索してIDを探す（JSブロック対策強化）"""
     encoded_name = urllib.parse.quote(hotel_name)
     search_url = f"https://search.travel.rakuten.co.jp/ds/search/dtl?f_kw={encoded_name}"
-    # ロボット感を消すための偽装ヘッダー
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
     }
-    
     try:
         response = requests.get(search_url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # パターン1: リンク(aタグ)から探す
         for a in soup.find_all('a', href=True):
             hotel_id = extract_id_from_text(a['href'])
             if hotel_id: return hotel_id
-            
-        # パターン2: 楽天特有の「裏側のコード(script)」に隠されたIDを探す
         for script in soup.find_all('script'):
             if script.string:
                 hotel_id = extract_id_from_text(script.string)
                 if hotel_id: return hotel_id
     except Exception as e:
-        print(f"検索エラー: {e}")
+        pass
     return None
 
 def scrape_rakuten_reviews(hotel_id):
-    """IDを使って口コミページからデータを無料で引っこ抜く"""
+    """口コミを抽出しつつ、デバッグ情報（ログ）も一緒に返す"""
     review_url = f"https://travel.rakuten.co.jp/HOTEL/{hotel_id}/review.html"
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'}
+    
+    # 楽天の強力なBotブロックをすり抜けるための、より人間に近いヘッダー設定
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+        'Referer': f'https://travel.rakuten.co.jp/HOTEL/{hotel_id}/',
+    }
     
     reviews = []
+    debug_log = [] # ★エラー解析用のログ
+    
     try:
-        response = requests.get(review_url, headers=headers, timeout=10)
+        debug_log.append(f"アクセス先: {review_url}")
+        
+        response = requests.get(review_url, headers=headers, timeout=15)
+        debug_log.append(f"HTTPステータス: {response.status_code}")
+        
+        # もしブロックされていたらここでエラーを出す
+        response.raise_for_status() 
+        
+        # 取得したHTMLの文字化けを防ぐ
+        response.encoding = response.apparent_encoding 
         soup = BeautifulSoup(response.text, 'html.parser')
         
+        # HTMLがちゃんと取れているか、先頭200文字だけログに残す
+        debug_log.append(f"取得HTML（先頭200文字）:\n{soup.prettify()[:200]}")
+        
+        # 楽天トラベルの口コミが入っている箱を探す
         comments = soup.find_all('p', class_='commentSentence')
         dates = soup.find_all('span', class_='time')
+        
+        debug_log.append(f"見つかった「commentSentence」の数: {len(comments)}件")
         
         for i, comment in enumerate(comments):
             text = comment.get_text(strip=True)
             if text:
                 date_str = dates[i].get_text(strip=True) if i < len(dates) else "日付不明"
                 reviews.append({"text": text, "date": date_str})
+                
     except Exception as e:
-        print(f"抽出エラー: {e}")
-    return reviews
+        debug_log.append(f"🚨 重大なエラー発生: {str(e)}")
+        
+    return reviews, "\n".join(debug_log)
 
 # メイン処理
 if analyze_btn and target_input:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     
-    with st.status("🔍 ターゲットを解析中...", expanded=True) as status:
+    with st.status("🔍 解析を開始します...", expanded=True) as status:
         
-        # 1. URL入力か、ホテル名入力かを自動判定
         if target_input.startswith("http"):
-            status.update(label="URLを検知しました。直接口コミを抽出します...")
             hotel_id = extract_id_from_text(target_input)
-            display_name = "指定されたURLのホテル"
+            display_name = "指定URLのホテル"
         else:
-            status.update(label=f"「{target_input}」を楽天トラベルで検索中...")
             hotel_id = get_rakuten_hotel_id(target_input)
             display_name = target_input
             
         if not hotel_id:
-            status.update(label="ホテルが見つかりませんでした。楽天の口コミURLを直接貼り付けてみてください。", state="error")
+            status.update(label="ホテルIDが見つかりませんでした", state="error")
             st.stop()
             
-        # 2. 無料スクレイピングの実行
-        status.update(label="口コミページにアクセスし、データを抽出中...")
-        valid_reviews = scrape_rakuten_reviews(hotel_id)
+        status.update(label="楽天トラベルからデータを抽出中...")
+        
+        # ★関数から「口コミデータ」と「デバッグログ」の2つを受け取る
+        valid_reviews, debug_text = scrape_rakuten_reviews(hotel_id)
 
+        # もし1件も取れなかった場合、画面にエラーログをガッツリ表示する！
         if not valid_reviews:
-            status.update(label="口コミが見つかりませんでした。まだ投稿されていないか、URLが間違っている可能性があります。", state="error")
+            status.update(label="抽出失敗：口コミが0件でした", state="error")
+            st.error("データの抽出に失敗しました。原因究明のため、以下のログを確認してください。")
+            with st.expander("🛠 デバッグ情報（ここを開いて中身を教えてください）", expanded=True):
+                st.code(debug_text, language="text")
             st.stop()
 
         status.update(label=f"計 {len(valid_reviews)} 件の口コミを抽出完了！AI分析を開始します...", state="running")
