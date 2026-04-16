@@ -15,7 +15,7 @@ st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化�
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆爆速分析搭載！")
+    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆重複排除機能搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
     target_input = st.text_input("じゃらんの口コミURL を入力", "https://www.jalan.net/yad331562/kuchikomi/")
@@ -27,6 +27,7 @@ def scrape_jalan_reviews(base_url, max_pages):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     reviews = []
+    seen_texts = set() # 重複排除用のセット
     debug_log = []
     current_url = base_url
     
@@ -41,15 +42,25 @@ def scrape_jalan_reviews(base_url, max_pages):
             comments = soup.find_all(['p', 'div'], class_=re.compile(r'jlnpc-kuchikomiCassette__postBody|jln-review-detail__text|kuchikomi-text'))
             
             if not comments:
-                debug_log.append(f"⚠️ {page+1}ページ目で口コミが見つかりませんでした。抽出を終了します。")
+                debug_log.append(f"⚠️ {page+1}ページ目で口コミ要素が見つかりませんでした。")
                 break 
                 
-            debug_log.append(f"→ 本物の口コミを {len(comments)}件 発見！")
+            added_in_this_page = 0
             for comment in comments:
                 text = comment.get_text(strip=True)
-                if len(text) > 10: 
+                # 10文字以上、かつ、まだ追加していないテキスト（重複排除）のみ取得
+                if len(text) > 10 and text not in seen_texts: 
                     reviews.append({"text": text, "date": "日付不明"})
+                    seen_texts.add(text)
+                    added_in_this_page += 1
             
+            debug_log.append(f"→ 新規の口コミを {added_in_this_page}件 取得！")
+            
+            # このページで1件も新しい口コミが取れなかった場合は、最終ページとみなしてループを抜ける
+            if added_in_this_page == 0:
+                debug_log.append("⚠️ 新規の口コミが0件のため、すべての口コミを取得完了したと判定し終了します。")
+                break
+
             next_link = soup.find('a', string=re.compile(r'.*次へ.*'))
             if not next_link:
                 next_link = soup.find('a', class_=re.compile(r'next|jln-pagination__next'))
@@ -58,10 +69,16 @@ def scrape_jalan_reviews(base_url, max_pages):
                 next_url = next_link['href']
                 if not next_url.startswith('http'):
                     next_url = urllib.parse.urljoin(current_url, next_url)
+                
+                # 次のURLが現在のURLと全く同じ場合（無効なボタン等）は終了
+                if next_url == current_url:
+                    debug_log.append("⚠️ 「次へ」のURLがループしているため終了します。")
+                    break
+                    
                 current_url = next_url
-                time.sleep(1) # スクレイピングの負荷軽減
+                time.sleep(1) 
             else:
-                debug_log.append("「次へ」のボタンがないため、最後のページです。")
+                debug_log.append("「次へ」のリンクがないため、最後のページです。")
                 break 
                 
     except Exception as e:
@@ -72,26 +89,28 @@ def scrape_jalan_reviews(base_url, max_pages):
 if analyze_btn and target_input:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     
-    # UI修正: 最初は「探索中」であることを明示
     with st.status(f"🔍 じゃらんの口コミを探索中... (最大 {max_pages} ページ)", expanded=True) as status:
         valid_reviews, debug_text = scrape_jalan_reviews(target_input, max_pages)
         actual_count = len(valid_reviews)
 
-        if actual_count == 0:
-            status.update(label="抽出失敗：口コミが0件でした", state="error")
-            st.error("じゃらんからのデータ抽出に失敗しました。URLが正しいか確認してください。")
-            with st.expander("🛠 デバッグ情報（抽出ログ）", expanded=True):
-                st.code(debug_text, language="text")
-            st.stop()
+        status.update(label=f"✅ スクレイピング完了！重複を除いた【 実際の口コミ件数：{actual_count}件 】", state="complete")
 
-        # UI修正: 実際に取得できた件数にテキストを上書き更新する
-        status.update(label=f"✅ 抽出完了：実際の口コミは【 計 {actual_count} 件 】でした！AI分析を開始します...", state="running")
-        
+    # ========= デバッグ用UIの追加 =========
+    with st.expander("🛠 【重要】AI分析に回す「生の取得データ」と「ログ」を確認する", expanded=True):
+        st.write("※ ここに表示されているテキストが『本当の口コミ』になっているか確認してください。関係ない文字ばかりならスクレイピングの精度を直す必要があります。")
+        if actual_count > 0:
+            st.dataframe(pd.DataFrame(valid_reviews))
+        st.text_area("抽出ログ", debug_text, height=150)
+    # ====================================
+
+    if actual_count == 0:
+        st.error("有効な口コミデータが取得できませんでした。上記の抽出ログを確認してください。")
+        st.stop()
+
+    with st.spinner(f"🤖 AIが {actual_count} 件の口コミから「清掃課題」を探しています..."):
         results = []
         cleaning_count = 0
         progress_bar = st.progress(0)
-        
-        # 爆速化: バッチサイズを10から50に大幅アップ！
         batch_size = 50 
         
         for i in range(0, actual_count, batch_size):
@@ -144,7 +163,6 @@ if analyze_btn and target_input:
                                 "要約": analysis.get('summary', '-')
                             })
                     
-                    # 爆速化: スリープ時間を4秒から1秒に短縮
                     time.sleep(1) 
                     break 
                 except Exception as e:
@@ -157,7 +175,7 @@ if analyze_btn and target_input:
             progress = min((i + batch_size) / actual_count, 1.0)
             progress_bar.progress(progress)
             
-        status.update(label=f"🎉 全 {actual_count} 件の分析が完了しました！", state="complete")
+    st.success(f"🎉 全 {actual_count} 件の分析が完了しました！")
 
     st.subheader(f"分析結果（実際の抽出件数: {actual_count}件）")
     col1, col2 = st.columns(2)
@@ -182,7 +200,7 @@ if analyze_btn and target_input:
                            color_discrete_map={'高': '#EF4444', '中': '#F59E0B', '低': '#10B981', '対象外': '#9CA3AF'})
             st.plotly_chart(fig_pie, use_container_width=True)
     else:
-        st.success("分析した口コミの中に、清掃に関する課題は見当たりませんでした。")
+        st.warning("分析した口コミの中に、清掃に関する課題は見当たりませんでした。")
 
     st.subheader("📋 口コミ詳細一覧")
     st.dataframe(df, use_container_width=True)
