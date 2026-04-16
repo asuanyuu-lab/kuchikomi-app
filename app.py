@@ -15,7 +15,7 @@ st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化�
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\n重複の可視化＆高精度AI分析搭載！")
+    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆重複排除機能搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
     target_input = st.text_input("じゃらんの口コミURL を入力", "https://www.jalan.net/yad331562/kuchikomi/")
@@ -42,40 +42,64 @@ def scrape_jalan_reviews(base_url, max_pages):
             comments = soup.find_all(['p', 'div'], class_=re.compile(r'jlnpc-kuchikomiCassette__postBody|jln-review-detail__text|kuchikomi-text'))
             
             if not comments:
-                debug_log.append(f"⚠️ {page+1}ページ目で口コミ要素が見つかりませんでした。")
+                debug_log.append(f"⚠️ {page+1}ページ目で口コミ要素が見つかりませんでした。抽出を終了します。")
                 break 
                 
             added_in_this_page = 0
-            duplicates_in_this_page = 0 # 重複カウント用を追加
-            
+            skipped_in_this_page = 0
             for comment in comments:
                 text = comment.get_text(strip=True)
-                if len(text) > 10:
-                    if text not in seen_texts: 
+                if len(text) > 10: 
+                    if text not in seen_texts:
                         reviews.append({"text": text, "date": "日付不明"})
                         seen_texts.add(text)
                         added_in_this_page += 1
                     else:
-                        duplicates_in_this_page += 1
+                        skipped_in_this_page += 1
             
-            # デバッグログに重複件数も明記する
-            debug_log.append(f"→ 新規の口コミ: {added_in_this_page}件 / 重複してスキップした口コミ: {duplicates_in_this_page}件")
+            debug_log.append(f"→ 新規の口コミを {added_in_this_page}件 取得！ / 重複スキップ: {skipped_in_this_page}件")
             
             if added_in_this_page == 0:
                 debug_log.append("⚠️ 新規の口コミが0件のため、すべての口コミを取得完了したと判定し終了します。")
                 break
 
-            next_link = soup.find('a', string=re.compile(r'.*次へ.*'))
-            if not next_link:
-                next_link = soup.find('a', class_=re.compile(r'next|jln-pagination__next'))
-                
-            if next_link and next_link.has_attr('href'):
-                next_url = next_link['href']
+            # ========================================================
+            # ページネーション（次へ）の取得ロジックを大幅強化（ダミーリンク対策）
+            # ========================================================
+            next_url = None
+            
+            # 1. SEO用の <link rel="next"> があれば最優先（ダミーを引く可能性がゼロ）
+            seo_next = soup.find('link', rel='next')
+            if seo_next and seo_next.get('href'):
+                next_url = seo_next['href']
+            
+            # 2. なければ「次へ」を含むリンクから、ダミー（#やjavascript）を除外して探す
+            if not next_url:
+                for a in soup.find_all('a'):
+                    text = a.get_text(strip=True)
+                    href = a.get('href', '')
+                    if '次へ' in text and href and not href.startswith(('#', 'javascript')):
+                        next_url = href
+                        break
+            
+            # 3. それでもなければクラス名で探す
+            if not next_url:
+                for a in soup.find_all('a', class_=re.compile(r'(?i)next|jln-pagination__next|jlnpc-kuchikomiPagination__next')):
+                    href = a.get('href', '')
+                    if href and not href.startswith(('#', 'javascript')):
+                        next_url = href
+                        break
+                        
+            if next_url:
                 if not next_url.startswith('http'):
                     next_url = urllib.parse.urljoin(current_url, next_url)
                 
-                if next_url == current_url:
-                    debug_log.append("⚠️ 「次へ」のURLがループしているため終了します。")
+                # ループ防止：URLのフラグメント（#以降）を削除してベースURLを厳密に比較
+                current_base = urllib.parse.urldefrag(current_url)[0]
+                next_base = urllib.parse.urldefrag(next_url)[0]
+                
+                if current_base == next_base:
+                    debug_log.append("⚠️ 「次へ」のURLが現在と実質同じ（#の違いのみ）ため終了します。")
                     break
                     
                 current_url = next_url
@@ -98,11 +122,11 @@ if analyze_btn and target_input:
 
         status.update(label=f"✅ スクレイピング完了！重複を除いた【 実際の口コミ件数：{actual_count}件 】", state="complete")
 
-    with st.expander("🛠 【重要】AI分析に回す「生の取得データ」と「ログ」を確認する", expanded=True):
+    with st.expander("🛠 【重要】AI分析に回す「生の取得データ」と「ログ」を確認する", expanded=False):
         st.write("※ ここに表示されているテキストが『本当の口コミ』になっているか確認してください。")
-        st.text_area("抽出ログ（重複排除の状況などを確認）", debug_text, height=200)
         if actual_count > 0:
             st.dataframe(pd.DataFrame(valid_reviews))
+        st.text_area("抽出ログ", debug_text, height=150)
 
     if actual_count == 0:
         st.error("有効な口コミデータが取得できませんでした。上記の抽出ログを確認してください。")
@@ -118,22 +142,13 @@ if analyze_btn and target_input:
             batch = valid_reviews[i:i + batch_size]
             input_data = [{"id": j, "text": r['text']} for j, r in enumerate(batch)]
             
-            # AIの判断基準を「営業マン特化」に大幅強化
             prompt = f"""
-            あなたは清掃ロボット・清掃サービスの優秀なインサイドセールスです。
-            以下の複数の口コミを分析し、指定されたJSONの配列形式で回答してください。
-
-            【超重要：清掃課題（is_cleaning）の判定基準】
-            以下の要素が1つでも含まれていれば、必ず `is_cleaning: true` と判定してください。
-            1. カビ（黒カビ等）、シミ、ホコリ、髪の毛、ゴミ、水垢、ニオイに関する言及。
-            2. ユーザーが「経年劣化だから仕方ない」「古いから妥協した」と諦めている場合でも、対象がシミやカビ等の汚れであれば絶対に「true」です。（特殊清掃でアプローチできるため）
-            3. 部屋全体や水回りの「清潔感がない」「薄暗くて汚く見える」といった言及。
-
+            あなたは清掃ロボット営業マンです。以下の複数の口コミを分析し、指定されたJSONの配列形式で回答してください。
             1. id: 入力されたid
-            2. is_cleaning: (true/false) 清掃関連の課題・不満が含まれているか（上記基準を厳守）
-            3. category: 「床のホコリ・ゴミ・シミ」「水回りの汚れ・カビ」「ニオイ」「ベッド周辺」「その他清掃」「清掃以外」
-            4. robot_match: 清掃ロボットや特殊清掃で解決可能か (高/中/低/対象外)
-            5. score: 緊急度・不満度 (1〜5)
+            2. is_cleaning: (true/false) 清掃関連の不満か
+            3. category: 「床のホコリ・ゴミ」「水回りの汚れ・カビ」「ニオイ」「ベッド周辺」「その他清掃」「清掃以外」
+            4. robot_match: 清掃ロボットで解決可能か (高/中/低/対象外)
+            5. score: 緊急度 (1〜5)
             6. summary: 15文字以内の要約
 
             【入力データ】
