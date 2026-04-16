@@ -7,90 +7,64 @@ import plotly.express as px
 import time
 import requests
 from bs4 import BeautifulSoup
-import urllib.parse
 import re
 
 # 1. ページ設定
 st.set_page_config(page_title="ホテル口コミ分析", layout="wide")
-st.title("🏨 ホテル口コミ分析 - 完全無料版（楽天ハイブリッド型）")
+st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん対応）")
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中")
+    st.success("✨ 完全無料モード稼働中：\nじゃらんの口コミページURLを入力してください。")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    target_input = st.text_input("ホテル名、または 楽天の口コミURL を入力", "https://travel.rakuten.co.jp/HOTEL/182842/review.html")
+    
+    st.markdown("### 抽出ターゲット")
+    # 楽天ではなく「じゃらん」の口コミURLを入力させます
+    target_input = st.text_input("じゃらんの口コミURL を入力", "https://www.jalan.net/yad331562/kuchikomi/")
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
 
-def extract_id_from_text(text):
-    match = re.search(r'HOTEL/(\d+)', text, re.IGNORECASE)
-    return match.group(1) if match else None
-
-def get_rakuten_hotel_id(hotel_name):
-    encoded_name = urllib.parse.quote(hotel_name)
-    search_url = f"https://search.travel.rakuten.co.jp/ds/search/dtl?f_kw={encoded_name}"
+def scrape_jalan_reviews(review_url):
+    """じゃらんから口コミを抽出し、デバッグ情報も返す"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-    }
-    try:
-        response = requests.get(search_url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            hotel_id = extract_id_from_text(a['href'])
-            if hotel_id: return hotel_id
-        for script in soup.find_all('script'):
-            if script.string:
-                hotel_id = extract_id_from_text(script.string)
-                if hotel_id: return hotel_id
-    except Exception as e:
-        pass
-    return None
-
-def scrape_rakuten_reviews(hotel_id):
-    """口コミを抽出しつつ、デバッグ情報（ログ）も一緒に返す"""
-    review_url = f"https://travel.rakuten.co.jp/HOTEL/{hotel_id}/review.html"
-    
-    # 楽天の強力なBotブロックをすり抜けるための、より人間に近いヘッダー設定
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-        'Referer': f'https://travel.rakuten.co.jp/HOTEL/{hotel_id}/',
     }
     
     reviews = []
-    debug_log = [] # ★エラー解析用のログ
+    debug_log = []
     
     try:
         debug_log.append(f"アクセス先: {review_url}")
-        
         response = requests.get(review_url, headers=headers, timeout=15)
         debug_log.append(f"HTTPステータス: {response.status_code}")
-        
-        # もしブロックされていたらここでエラーを出す
         response.raise_for_status() 
         
-        # 取得したHTMLの文字化けを防ぐ
         response.encoding = response.apparent_encoding 
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # HTMLがちゃんと取れているか、先頭200文字だけログに残す
-        debug_log.append(f"取得HTML（先頭200文字）:\n{soup.prettify()[:200]}")
+        debug_log.append(f"取得HTML（先頭150文字）:\n{soup.prettify()[:150]}")
         
-        # 楽天トラベルの口コミが入っている箱を探す
-        comments = soup.find_all('p', class_='commentSentence')
-        dates = soup.find_all('span', class_='time')
+        # じゃらんの口コミ本文を探す（クラス名が変わっても対応できるよう複数指定）
+        comments = soup.find_all('p', class_=re.compile(r'jln-review-detail__text|kuchikomi-text|jln-quic-review-body|p-review__text', re.I))
         
-        debug_log.append(f"見つかった「commentSentence」の数: {len(comments)}件")
-        
-        for i, comment in enumerate(comments):
-            text = comment.get_text(strip=True)
-            if text:
-                date_str = dates[i].get_text(strip=True) if i < len(dates) else "日付不明"
-                reviews.append({"text": text, "date": date_str})
-                
+        # 🚀【無敵モード】もし特定のクラスで見つからなければ「50文字以上の長文」を口コミとして強引に拾う
+        if not comments:
+            debug_log.append("専用クラスが見つからないため、長文解析モードに切り替えます。")
+            paragraphs = soup.find_all(['p', 'div'])
+            for p in paragraphs:
+                text = p.get_text(strip=True)
+                # 50文字以上で、かつメニューなどの不要ワードを含まないものを抽出
+                if len(text) > 50 and not re.search(r'プラン詳細|予約する|キャンセル|会員登録', text):
+                    reviews.append({"text": text, "date": "日付不明"})
+        else:
+            debug_log.append(f"見つかった口コミの数: {len(comments)}件")
+            for comment in comments:
+                text = comment.get_text(strip=True)
+                if len(text) > 20: # 短すぎるノイズを排除
+                    reviews.append({"text": text, "date": "日付不明"})
+                    
     except Exception as e:
-        debug_log.append(f"🚨 重大なエラー発生: {str(e)}")
+        debug_log.append(f"🚨 エラー発生: {str(e)}")
         
     return reviews, "\n".join(debug_log)
 
@@ -98,29 +72,14 @@ def scrape_rakuten_reviews(hotel_id):
 if analyze_btn and target_input:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     
-    with st.status("🔍 解析を開始します...", expanded=True) as status:
+    with st.status("🔍 じゃらんからデータを抽出中...", expanded=True) as status:
         
-        if target_input.startswith("http"):
-            hotel_id = extract_id_from_text(target_input)
-            display_name = "指定URLのホテル"
-        else:
-            hotel_id = get_rakuten_hotel_id(target_input)
-            display_name = target_input
-            
-        if not hotel_id:
-            status.update(label="ホテルIDが見つかりませんでした", state="error")
-            st.stop()
-            
-        status.update(label="楽天トラベルからデータを抽出中...")
-        
-        # ★関数から「口コミデータ」と「デバッグログ」の2つを受け取る
-        valid_reviews, debug_text = scrape_rakuten_reviews(hotel_id)
+        valid_reviews, debug_text = scrape_jalan_reviews(target_input)
 
-        # もし1件も取れなかった場合、画面にエラーログをガッツリ表示する！
         if not valid_reviews:
             status.update(label="抽出失敗：口コミが0件でした", state="error")
-            st.error("データの抽出に失敗しました。原因究明のため、以下のログを確認してください。")
-            with st.expander("🛠 デバッグ情報（ここを開いて中身を教えてください）", expanded=True):
+            st.error("じゃらんからのデータ抽出に失敗しました。以下のログを確認してください。")
+            with st.expander("🛠 デバッグ情報（抽出ログ）", expanded=True):
                 st.code(debug_text, language="text")
             st.stop()
 
@@ -200,7 +159,7 @@ if analyze_btn and target_input:
         status.update(label="すべての分析が完了しました！", state="complete")
 
     # ダッシュボード表示
-    st.subheader(f"「{display_name}」の分析結果（抽出件数: {len(valid_reviews)}件）")
+    st.subheader(f"分析結果（抽出件数: {len(valid_reviews)}件）")
     
     col1, col2 = st.columns(2)
     col1.metric("取得した口コミ数", f"{len(valid_reviews)}件")
