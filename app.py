@@ -10,29 +10,22 @@ from bs4 import BeautifulSoup
 import re
 import urllib.parse
 
-# 1. ページ設定
 st.set_page_config(page_title="ホテル口コミ分析", layout="wide")
 st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化型）")
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\n自動ページめくり機能搭載！")
+    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆爆速分析搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
-    st.markdown("### 抽出ターゲット")
     target_input = st.text_input("じゃらんの口コミURL を入力", "https://www.jalan.net/yad331562/kuchikomi/")
-    
-    # ★新機能：何ページめくるかを選択できる！
-    max_pages = st.number_input("取得する最大ページ数（1ページ約30件）", min_value=1, max_value=15, value=5)
-    
+    max_pages = st.number_input("探索する最大ページ数（※1ページ最大約30件）", min_value=1, max_value=15, value=5)
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
 
 def scrape_jalan_reviews(base_url, max_pages):
-    """じゃらんから複数ページの口コミを正確に抽出し、デバッグ情報も返す"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
-    
     reviews = []
     debug_log = []
     current_url = base_url
@@ -45,11 +38,10 @@ def scrape_jalan_reviews(base_url, max_pages):
             response.encoding = response.apparent_encoding 
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 🚀【修正の目玉】じゃらんの「本物の口コミ」が入っている正確な箱だけを狙い撃ち！
             comments = soup.find_all(['p', 'div'], class_=re.compile(r'jlnpc-kuchikomiCassette__postBody|jln-review-detail__text|kuchikomi-text'))
             
             if not comments:
-                debug_log.append(f"⚠️ {page+1}ページ目で口コミが見つかりませんでした。")
+                debug_log.append(f"⚠️ {page+1}ページ目で口コミが見つかりませんでした。抽出を終了します。")
                 break 
                 
             debug_log.append(f"→ 本物の口コミを {len(comments)}件 発見！")
@@ -58,10 +50,8 @@ def scrape_jalan_reviews(base_url, max_pages):
                 if len(text) > 10: 
                     reviews.append({"text": text, "date": "日付不明"})
             
-            # 🚀【新機能】「次へ」のリンクを探して、自動でページをめくる
             next_link = soup.find('a', string=re.compile(r'.*次へ.*'))
             if not next_link:
-                # クラス名で探すフォールバック
                 next_link = soup.find('a', class_=re.compile(r'next|jln-pagination__next'))
                 
             if next_link and next_link.has_attr('href'):
@@ -69,9 +59,7 @@ def scrape_jalan_reviews(base_url, max_pages):
                 if not next_url.startswith('http'):
                     next_url = urllib.parse.urljoin(current_url, next_url)
                 current_url = next_url
-                
-                # サーバーにブロックされないよう2秒休憩（これ超重要です）
-                time.sleep(2) 
+                time.sleep(1) # スクレイピングの負荷軽減
             else:
                 debug_log.append("「次へ」のボタンがないため、最後のページです。")
                 break 
@@ -81,30 +69,32 @@ def scrape_jalan_reviews(base_url, max_pages):
         
     return reviews, "\n".join(debug_log)
 
-# メイン処理
 if analyze_btn and target_input:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     
-    with st.status(f"🔍 じゃらんから最大 {max_pages} ページ分のデータを抽出中...", expanded=True) as status:
-        
+    # UI修正: 最初は「探索中」であることを明示
+    with st.status(f"🔍 じゃらんの口コミを探索中... (最大 {max_pages} ページ)", expanded=True) as status:
         valid_reviews, debug_text = scrape_jalan_reviews(target_input, max_pages)
+        actual_count = len(valid_reviews)
 
-        if not valid_reviews:
+        if actual_count == 0:
             status.update(label="抽出失敗：口コミが0件でした", state="error")
-            st.error("じゃらんからのデータ抽出に失敗しました。以下のログを確認してください。")
+            st.error("じゃらんからのデータ抽出に失敗しました。URLが正しいか確認してください。")
             with st.expander("🛠 デバッグ情報（抽出ログ）", expanded=True):
                 st.code(debug_text, language="text")
             st.stop()
 
-        status.update(label=f"計 {len(valid_reviews)} 件の【本物の口コミ】を抽出完了！AI分析を開始します...", state="running")
+        # UI修正: 実際に取得できた件数にテキストを上書き更新する
+        status.update(label=f"✅ 抽出完了：実際の口コミは【 計 {actual_count} 件 】でした！AI分析を開始します...", state="running")
         
-        # 3. AIによるまとめ読み分析
         results = []
         cleaning_count = 0
         progress_bar = st.progress(0)
-        batch_size = 10 
         
-        for i in range(0, len(valid_reviews), batch_size):
+        # 爆速化: バッチサイズを10から50に大幅アップ！
+        batch_size = 50 
+        
+        for i in range(0, actual_count, batch_size):
             batch = valid_reviews[i:i + batch_size]
             input_data = [{"id": j, "text": r['text']} for j, r in enumerate(batch)]
             
@@ -154,29 +144,25 @@ if analyze_btn and target_input:
                                 "要約": analysis.get('summary', '-')
                             })
                     
-                    time.sleep(4) 
+                    # 爆速化: スリープ時間を4秒から1秒に短縮
+                    time.sleep(1) 
                     break 
-                    
                 except Exception as e:
                     if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                         if attempt < max_retries - 1:
-                            time.sleep(20)
-                        else:
-                            pass 
-                    else:
-                        break
+                            time.sleep(10)
+                        else: pass 
+                    else: break
             
-            progress = min((i + batch_size) / len(valid_reviews), 1.0)
+            progress = min((i + batch_size) / actual_count, 1.0)
             progress_bar.progress(progress)
             
-        status.update(label="すべての分析が完了しました！", state="complete")
+        status.update(label=f"🎉 全 {actual_count} 件の分析が完了しました！", state="complete")
 
-    # ダッシュボード表示
-    st.subheader(f"分析結果（抽出件数: {len(valid_reviews)}件）")
-    
+    st.subheader(f"分析結果（実際の抽出件数: {actual_count}件）")
     col1, col2 = st.columns(2)
-    col1.metric("取得した口コミ数", f"{len(valid_reviews)}件")
-    col2.metric("清掃課題率", f"{(cleaning_count/len(valid_reviews)*100 if valid_reviews else 0):.1f}%")
+    col1.metric("実際に取得した口コミ数", f"{actual_count}件")
+    col2.metric("清掃課題率", f"{(cleaning_count/actual_count*100 if actual_count > 0 else 0):.1f}%")
 
     expected_columns = ["時期", "内容", "清掃関連", "カテゴリ", "ロボット適性", "スコア", "要約"]
     df = pd.DataFrame(results, columns=expected_columns).fillna("-")
