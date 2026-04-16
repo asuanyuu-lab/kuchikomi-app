@@ -16,12 +16,11 @@ st.title("🏨 ホテル口コミ分析 - 完全無料版（じゃらん特化�
 
 with st.sidebar:
     st.header("設定")
-    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆終了予測タイマー搭載！")
+    st.success("✨ 完全無料モード稼働中：\n自動ページめくり＆API制限回避機能搭載！")
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     
     target_input = st.text_input("じゃらんの口コミURL を入力", "")
-    # 改善：最大ページ数を30（約900件）まで拡張
-    max_pages = st.number_input("探索する最大ページ数（※1ページ最大30件）", min_value=1, max_value=30, value=5)
+    max_pages = st.number_input("探索する最大ページ数（※1ページ最大30件）", min_value=1, max_value=30, value=15)
     analyze_btn = st.button("🚀 無料で口コミを抽出＆分析", type="primary")
 
 def scrape_jalan_reviews(base_url, max_pages):
@@ -65,7 +64,6 @@ def scrape_jalan_reviews(base_url, max_pages):
                 debug_log.append("⚠️ 新規の口コミが0件のため終了します。")
                 break
 
-            # ページ送りロジック
             next_url = None
             next_link = soup.find('a', class_=re.compile(r'(?i)next'))
             if not next_link:
@@ -80,7 +78,6 @@ def scrape_jalan_reviews(base_url, max_pages):
                     next_page_num = match.group(2)
                     parsed = urllib.parse.urlparse(current_url)
                     
-                    # 前回の修正を反映：拡張子を必ず大文字 .HTML に
                     path = re.sub(r'\d+\.html$', '', parsed.path, flags=re.IGNORECASE)
                     if not path.endswith('/'):
                         path += '/'
@@ -129,7 +126,6 @@ if analyze_btn:
             st.error("口コミが取得できませんでした。URLを確認してください。")
             st.stop()
 
-        # --- AI分析セクション（予測時間表示付き） ---
         st.info(f"🤖 AI分析を開始します（処理対象: {actual_count} 件）")
         
         progress_info = st.empty()
@@ -138,16 +134,15 @@ if analyze_btn:
         
         results = []
         cleaning_count = 0
-        batch_size = 50 
+        # 修正: 制限回避のためバッチサイズを30件に縮小
+        batch_size = 30 
         start_time = time.time()
         
-        # 全バッチ数の計算
         total_batches = (actual_count + batch_size - 1) // batch_size
         
         for i in range(0, actual_count, batch_size):
             batch_index = (i // batch_size) + 1
             
-            # 残り時間の計算ロジック
             elapsed_time = time.time() - start_time
             if i > 0:
                 avg_time_per_batch = elapsed_time / (batch_index - 1)
@@ -155,11 +150,9 @@ if analyze_btn:
                 seconds_left = int(avg_time_per_batch * remaining_batches)
                 eta_str = str(timedelta(seconds=seconds_left))
             else:
-                # 初回バッチは目安を表示（Flashなら大体1バッチ5秒前後）
-                seconds_left = total_batches * 5
+                seconds_left = total_batches * 8 # 目安時間を少し長めに設定
                 eta_str = f"計算中... (目安: 約{seconds_left}秒)"
 
-            # UI更新
             progress_info.write(f"📊 **分析中:** {min(i + batch_size, actual_count)} / {actual_count} 件目")
             eta_info.write(f"⏳ **完了予測まであと:** `{eta_str}`")
             
@@ -179,39 +172,53 @@ if analyze_btn:
             {json.dumps(input_data, ensure_ascii=False)}
             """
             
-            try:
-                response = ai_client.models.generate_content(
-                    model='gemini-2.0-flash',
-                    contents=prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
-                )
-                
-                raw_text = response.text.strip()
-                if raw_text.startswith("```"):
-                    raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            max_retries = 4
+            for attempt in range(max_retries):
+                try:
+                    # モデルは無料枠で安定しやすい 1.5-flash または 2.0-flash を使用
+                    response = ai_client.models.generate_content(
+                        model='gemini-2.0-flash',
+                        contents=prompt,
+                        config=types.GenerateContentConfig(response_mime_type="application/json")
+                    )
                     
-                batch_analysis = json.loads(raw_text)
-                
-                for analysis in batch_analysis:
-                    idx = analysis.get("id")
-                    if idx is not None and idx < len(batch):
-                        original_review = batch[idx]
-                        if analysis.get('is_cleaning'): 
-                            cleaning_count += 1
-                        results.append({
-                            "時期": original_review.get('date', '-'),
-                            "内容": original_review['text'],
-                            "清掃関連": "あり" if analysis.get('is_cleaning') else "なし",
-                            "カテゴリ": analysis.get('category', '-'),
-                            "ロボット適性": analysis.get('robot_match', '-'),
-                            "スコア": analysis.get('score', 0),
-                            "要約": analysis.get('summary', '-')
-                        })
-                
-                time.sleep(1) 
-            except Exception as e:
-                st.error(f"AI分析中にエラーが発生しました: {e}")
-                break
+                    raw_text = response.text.strip()
+                    if raw_text.startswith("```"):
+                        raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                        
+                    batch_analysis = json.loads(raw_text)
+                    
+                    for analysis in batch_analysis:
+                        idx = analysis.get("id")
+                        if idx is not None and idx < len(batch):
+                            original_review = batch[idx]
+                            if analysis.get('is_cleaning'): 
+                                cleaning_count += 1
+                            results.append({
+                                "時期": original_review.get('date', '-'),
+                                "内容": original_review['text'],
+                                "清掃関連": "あり" if analysis.get('is_cleaning') else "なし",
+                                "カテゴリ": analysis.get('category', '-'),
+                                "ロボット適性": analysis.get('robot_match', '-'),
+                                "スコア": analysis.get('score', 0),
+                                "要約": analysis.get('summary', '-')
+                            })
+                    
+                    # 修正: 成功時もAPI制限にかからないよう3秒休ませる
+                    time.sleep(3)
+                    break 
+                except Exception as e:
+                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        if attempt < max_retries - 1:
+                            # 修正: 429エラーが出たら40秒しっかり待機してリセットを待つ
+                            eta_info.write(f"⚠️ API制限を回避中... 40秒待機してから再開します (リトライ {attempt+1}/{max_retries})")
+                            time.sleep(40)
+                        else: 
+                            st.error("APIの制限により中断しました。時間をおいて再度お試しください。")
+                            st.stop()
+                    else: 
+                        st.error(f"予期せぬエラーが発生しました: {e}")
+                        st.stop()
             
             progress_bar.progress(min((i + batch_size) / actual_count, 1.0))
             
@@ -221,7 +228,6 @@ if analyze_btn:
 
         st.divider()
 
-        # --- 以下、グラフ表示セクション ---
         st.subheader(f"分析結果サマリー")
         col1, col2 = st.columns(2)
         col1.metric("取得した口コミ総数", f"{actual_count}件")
